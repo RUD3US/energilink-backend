@@ -1,0 +1,16 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.log
+app.db
+.env
+.env.*
+cloud.env
+main.py.bak
+main.py.bak.*
+main.py.save
+main.txt
+mian.py
+.DS_Store
+mian.py.old

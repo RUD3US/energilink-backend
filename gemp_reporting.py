@@ -1,0 +1,409 @@
+import os
+import sqlite3
+import calendar
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
+
+DB_PATH = os.getenv("DB_PATH", "/home/ee/power-backend/app.db")
+REPORT_TZ = os.getenv("REPORT_TZ", "Asia/Manila")
+ARCHIVE_INTERVAL_HOURS = 0.5
+
+MONTHS = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+]
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def parse_iso_to_dt(s: str) -> datetime:
+    dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(ZoneInfo(REPORT_TZ))
+
+
+def configure_sqlite(conn: sqlite3.Connection):
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 5000")
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA synchronous = FULL")
+    conn.execute("PRAGMA foreign_keys = ON")
+
+
+def open_db() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=5.0)
+    configure_sqlite(conn)
+    return conn
+
+
+def ensure_report_tables(conn: sqlite3.Connection):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS report_recipients (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT UNIQUE NOT NULL,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL
+        );
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS report_schedule (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            frequency TEXT NOT NULL DEFAULT 'weekly',
+            send_time TEXT NOT NULL DEFAULT '08:00',
+            day_of_week INTEGER,
+            day_of_month INTEGER,
+            enabled INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL
+        );
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS report_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            report_type TEXT NOT NULL,
+            schedule_key TEXT NOT NULL,
+            scheduled_for TEXT NOT NULL,
+            sent_at TEXT,
+            status TEXT NOT NULL,
+            message TEXT
+        );
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_report_runs_type_key
+        ON report_runs(report_type, schedule_key)
+        """
+    )
+
+    row = conn.execute("SELECT 1 FROM report_schedule WHERE id=1").fetchone()
+    if not row:
+        conn.execute(
+            """
+            INSERT INTO report_schedule (
+                id, frequency, send_time, day_of_week, day_of_month, enabled, updated_at
+            ) VALUES (1, 'weekly', '08:00', 0, 1, 0, ?)
+            """,
+            (now_iso(),),
+        )
+
+    conn.commit()
+
+
+def list_report_recipients(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    rows = conn.execute(
+        "SELECT id, email, is_active, created_at FROM report_recipients ORDER BY email ASC"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def add_report_recipient(conn: sqlite3.Connection, email: str) -> Dict[str, Any]:
+    email = email.strip().lower()
+    if not email:
+        raise ValueError("Email is required")
+
+    conn.execute(
+        """
+        INSERT INTO report_recipients (email, is_active, created_at)
+        VALUES (?, 1, ?)
+        ON CONFLICT(email) DO UPDATE SET is_active=1
+        """,
+        (email, now_iso()),
+    )
+    conn.commit()
+
+    row = conn.execute(
+        "SELECT id, email, is_active, created_at FROM report_recipients WHERE email=?",
+        (email,),
+    ).fetchone()
+    return dict(row)
+
+
+def delete_report_recipient(conn: sqlite3.Connection, recipient_id: int):
+    conn.execute("DELETE FROM report_recipients WHERE id=?", (recipient_id,))
+    conn.commit()
+
+
+def get_active_recipient_emails(conn: sqlite3.Connection) -> List[str]:
+    rows = conn.execute(
+        "SELECT email FROM report_recipients WHERE is_active=1 ORDER BY email ASC"
+    ).fetchall()
+    return [str(r["email"]) for r in rows]
+
+
+def get_report_schedule(conn: sqlite3.Connection) -> Dict[str, Any]:
+    row = conn.execute("SELECT * FROM report_schedule WHERE id=1").fetchone()
+    if not row:
+        ensure_report_tables(conn)
+        row = conn.execute("SELECT * FROM report_schedule WHERE id=1").fetchone()
+    return dict(row)
+
+
+def upsert_report_schedule(
+    conn: sqlite3.Connection,
+    *,
+    frequency: str,
+    send_time: str,
+    day_of_week: Optional[int],
+    day_of_month: Optional[int],
+    enabled: int,
+) -> Dict[str, Any]:
+    frequency = frequency.strip().lower()
+    if frequency not in {"weekly", "monthly"}:
+        raise ValueError("frequency must be weekly or monthly")
+
+    if not send_time or ":" not in send_time:
+        raise ValueError("send_time must be HH:MM")
+
+    hh, mm = send_time.split(":", 1)
+    hour = int(hh)
+    minute = int(mm)
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        raise ValueError("send_time must be valid HH:MM")
+
+    if frequency == "weekly":
+        if day_of_week is None:
+            day_of_week = 0
+        if day_of_week < 0 or day_of_week > 6:
+            raise ValueError("day_of_week must be 0..6")
+        day_of_month = None
+
+    if frequency == "monthly":
+        if day_of_month is None:
+            day_of_month = 1
+        if day_of_month < 1 or day_of_month > 28:
+            raise ValueError("day_of_month must be 1..28")
+        day_of_week = None
+
+    conn.execute(
+        """
+        UPDATE report_schedule
+        SET frequency=?, send_time=?, day_of_week=?, day_of_month=?, enabled=?, updated_at=?
+        WHERE id=1
+        """,
+        (
+            frequency,
+            send_time,
+            day_of_week,
+            day_of_month,
+            1 if enabled else 0,
+            now_iso(),
+        ),
+    )
+    conn.commit()
+
+    return get_report_schedule(conn)
+
+
+def load_recent_field_points(
+    conn: sqlite3.Connection,
+    device: str,
+    field: str,
+    limit: int = 10000,
+) -> List[Tuple[datetime, float]]:
+    rows = conn.execute(
+        """
+        SELECT time, value
+        FROM realtime_points
+        WHERE device=? AND field=?
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (device, field, limit),
+    ).fetchall()
+
+    points: List[Tuple[datetime, float]] = []
+    for r in rows:
+        try:
+            dt = parse_iso_to_dt(r["time"])
+            value = float(r["value"])
+            points.append((dt, value))
+        except Exception:
+            continue
+
+    points.sort(key=lambda x: x[0])
+    return points
+
+
+def compute_kwh_from_points(points: List[Tuple[datetime, float]]) -> float:
+    total = 0.0
+    for _, power_w in points:
+        total += power_w * ARCHIVE_INTERVAL_HOURS / 1000.0
+    return total
+
+
+def compute_gemp_dynamic(
+    conn: sqlite3.Connection,
+    device: str = "pi4",
+    field: str = "power",
+) -> Dict[str, Any]:
+    tz = ZoneInfo(REPORT_TZ)
+    now_local = datetime.now(tz)
+    last_30_start = now_local - timedelta(days=30)
+    month_start = datetime(now_local.year, now_local.month, 1, tzinfo=tz)
+    current_month_days = calendar.monthrange(now_local.year, now_local.month)[1]
+    current_month_label = calendar.month_name[now_local.month]
+
+    points = load_recent_field_points(conn, device, field, limit=10000)
+    last_30_points = [(dt, val) for dt, val in points if dt >= last_30_start]
+    current_month_points = [(dt, val) for dt, val in points if dt >= month_start]
+
+    last_30_days_kwh = compute_kwh_from_points(last_30_points)
+    current_month_kwh = compute_kwh_from_points(current_month_points)
+    avg_daily_kwh_30d = last_30_days_kwh / 30.0 if last_30_days_kwh > 0 else 0.0
+
+    hours_elapsed_current_month = len(current_month_points) * ARCHIVE_INTERVAL_HOURS
+    avg_kwh_per_hour_current_month = (
+        current_month_kwh / hours_elapsed_current_month
+        if hours_elapsed_current_month > 0
+        else 0.0
+    )
+
+    projected_month_kwh = avg_daily_kwh_30d * current_month_days
+
+    return {
+        "device": device,
+        "field": field,
+        "archive_interval_hours": ARCHIVE_INTERVAL_HOURS,
+        "current_month_label": current_month_label,
+        "current_month_days": current_month_days,
+        "points_used_last_30_days": len(last_30_points),
+        "points_used_current_month": len(current_month_points),
+        "hours_elapsed_current_month": round(hours_elapsed_current_month, 4),
+        "last_30_days_kwh": round(last_30_days_kwh, 4),
+        "avg_daily_kwh_30d": round(avg_daily_kwh_30d, 4),
+        "current_month_kwh": round(current_month_kwh, 4),
+        "avg_kwh_per_hour_current_month": round(avg_kwh_per_hour_current_month, 6),
+        "projected_month_kwh": round(projected_month_kwh, 4),
+        "updated_at": now_local.isoformat(),
+    }
+
+
+def build_gemp_report_payload(
+    conn: sqlite3.Connection,
+    device: str = "pi4",
+    field: str = "power",
+) -> Dict[str, Any]:
+    dynamic = compute_gemp_dynamic(conn, device=device, field=field)
+
+    current_year = str(datetime.now(ZoneInfo(REPORT_TZ)).year)
+    current_month = dynamic["current_month_label"]
+
+    rows = []
+    for month in MONTHS:
+        rows.append(
+            {
+                "month": month,
+                "baseline2016": "",
+                "buildingDescription": "",
+                "grossArea": "",
+                "airconArea": "",
+                "occupants": "",
+                "kwh": f"{dynamic['current_month_kwh']:.2f}" if month == current_month else "",
+            }
+        )
+
+    avg_kwh = f"{dynamic['current_month_kwh']:.2f}" if dynamic["current_month_kwh"] > 0 else ""
+
+    return {
+        "header": {
+            "year": current_year,
+            "agency": os.getenv("GEMP_AGENCY", "GEMP Agency Name"),
+            "tel": os.getenv("GEMP_TEL", ""),
+            "address": os.getenv("GEMP_ADDRESS", ""),
+            "fax": os.getenv("GEMP_FAX", ""),
+            "region": os.getenv("GEMP_REGION", ""),
+        },
+        "rows": rows,
+        "stats": {
+            "avgBaseline": "",
+            "avgGrossArea": "",
+            "avgAirconArea": "",
+            "avgOccupants": "",
+            "avgKwh": avg_kwh,
+        },
+    }
+
+
+def schedule_key_for_now(schedule: Dict[str, Any], now_local: datetime) -> Optional[str]:
+    if not schedule.get("enabled"):
+        return None
+
+    send_time = str(schedule.get("send_time") or "08:00")
+    hh, mm = send_time.split(":", 1)
+    if now_local.hour != int(hh) or now_local.minute != int(mm):
+        return None
+
+    frequency = str(schedule.get("frequency") or "").lower()
+
+    if frequency == "weekly":
+        target_dow = int(schedule.get("day_of_week") if schedule.get("day_of_week") is not None else 0)
+        if now_local.weekday() != target_dow:
+            return None
+        iso = now_local.isocalendar()
+        return f"weekly:{iso.year}-W{iso.week:02d}"
+
+    if frequency == "monthly":
+        target_dom = int(schedule.get("day_of_month") if schedule.get("day_of_month") is not None else 1)
+        effective_dom = min(target_dom, calendar.monthrange(now_local.year, now_local.month)[1])
+        if now_local.day != effective_dom:
+            return None
+        return f"monthly:{now_local.year}-{now_local.month:02d}"
+
+    return None
+
+
+def has_report_run(conn: sqlite3.Connection, report_type: str, schedule_key: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM report_runs WHERE report_type=? AND schedule_key=? LIMIT 1",
+        (report_type, schedule_key),
+    ).fetchone()
+    return bool(row)
+
+
+def log_report_run(
+    conn: sqlite3.Connection,
+    *,
+    report_type: str,
+    schedule_key: str,
+    scheduled_for: str,
+    status: str,
+    message: str = "",
+):
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO report_runs (
+            report_type, schedule_key, scheduled_for, sent_at, status, message
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            report_type,
+            schedule_key,
+            scheduled_for,
+            now_iso(),
+            status,
+            message,
+        ),
+    )
+    conn.commit()
