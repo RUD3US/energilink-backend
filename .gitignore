@@ -14,3 +14,6 @@ main.txt
 mian.py
 mian.py.old
 .DS_Store
+app.db-shm
+app.db-wal
+main
