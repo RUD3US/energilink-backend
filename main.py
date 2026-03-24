@@ -41,7 +41,7 @@ ALLOWED_NOTE_FIELDS = {"power", "power_realtime"}
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-app = FastAPI(title="Power Backend", version="0.8.0")
+app = FastAPI(title="Power Backend", version="0.9.0")
 
 
 # -------------------------
@@ -331,6 +331,7 @@ class SendPlainEmailIn(BaseModel):
     subject: str = "EnergiLink SMTP test"
     body: str = "If you received this email, SMTP sending is working."
 
+
 class AuthIn(BaseModel):
     email: str
     password: str
@@ -409,12 +410,16 @@ class GempHeaderIn(BaseModel):
     address: Optional[str] = None
     fax: Optional[str] = None
     region: Optional[str] = None
+    preparedBy: Optional[str] = None
+    preparedByDesignation: Optional[str] = None
+    notedBy: Optional[str] = None
+    notedByDesignation: Optional[str] = None
 
 
 class GempRowIn(BaseModel):
     month: str
-    baseline2016: Optional[str] = None
-    buildingDescription: Optional[str] = None
+    baseline2025: Optional[str] = None
+    buildingDesc: Optional[str] = None
     grossArea: Optional[str] = None
     airconArea: Optional[str] = None
     occupants: Optional[str] = None
@@ -504,37 +509,19 @@ def health(db: sqlite3.Connection = Depends(get_db)):
         "org": os.getenv("INFLUX_ORG", ""),
     }
 
-@app.post("/reports/gemp/send-test")
-def send_test_gemp_report(
-    payload: SendTestReportIn,
-    db: sqlite3.Connection = Depends(get_db),
-):
-    recipients = [r.strip().lower() for r in (payload.recipients or []) if r.strip()]
-    if not recipients:
-        recipients = get_active_recipient_emails(db)
 
-    if not recipients:
-        raise HTTPException(status_code=400, detail="No active recipients configured")
+@app.get("/reports/email/debug-config")
+def email_debug_config():
+    return {
+        "SMTP_HOST": bool(os.getenv("SMTP_HOST", "").strip()),
+        "SMTP_PORT": os.getenv("SMTP_PORT", ""),
+        "SMTP_USERNAME": bool(os.getenv("SMTP_USERNAME", "").strip()),
+        "SMTP_PASSWORD": bool(os.getenv("SMTP_PASSWORD", "").strip()),
+        "SMTP_FROM": os.getenv("SMTP_FROM", ""),
+        "SMTP_STARTTLS": os.getenv("SMTP_STARTTLS", ""),
+        "SMTP_SSL": os.getenv("SMTP_SSL", ""),
+    }
 
-    try:
-        report_payload = build_gemp_report_payload(db, device="pi4", field="power")
-        out_path = build_gemp_docx(report_payload)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Report build failed: {e}")
-
-    try:
-        subject = "GEMP Report Test"
-        body = "Attached is the test GEMP report."
-        result = send_email_with_attachment(recipients, subject, body, out_path)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"SMTP send failed: {e}")
-    finally:
-        try:
-            os.remove(out_path)
-        except Exception:
-            pass
-
-    return {"ok": True, **result}
 
 @app.post("/ingest/metrics")
 def ingest_metrics(payload: MetricsIn, db: sqlite3.Connection = Depends(get_db)):
@@ -856,10 +843,52 @@ def current_month_kwh_summary(
 
 @app.post("/reports/gemp/docx")
 def export_gemp_docx(payload: GempReportIn, background_tasks: BackgroundTasks):
-    data = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
+    raw = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
+
+    header = raw.get("header", {}) or {}
+    rows = raw.get("rows", []) or []
+    stats = raw.get("stats", {}) or {}
+
+    normalized_rows = []
+    for row in rows:
+        normalized_rows.append(
+            {
+                "month": row.get("month", ""),
+                "baseline2025": row.get("baseline2025", "") or "",
+                "buildingDesc": row.get("buildingDesc", "") or "",
+                "grossArea": row.get("grossArea", "") or "",
+                "airconArea": row.get("airconArea", "") or "",
+                "occupants": row.get("occupants", "") or "",
+                "kwh": row.get("kwh", "") or "",
+            }
+        )
+
+    data = {
+        "header": {
+            "year": header.get("year", "") or "",
+            "agency": header.get("agency", "") or "",
+            "tel": header.get("tel", "") or "",
+            "address": header.get("address", "") or "",
+            "fax": header.get("fax", "") or "",
+            "region": header.get("region", "") or "",
+            "preparedBy": header.get("preparedBy", "") or "",
+            "preparedByDesignation": header.get("preparedByDesignation", "") or "",
+            "notedBy": header.get("notedBy", "") or "",
+            "notedByDesignation": header.get("notedByDesignation", "") or "",
+        },
+        "rows": normalized_rows,
+        "stats": {
+            "avgBaseline": stats.get("avgBaseline", "") or "",
+            "avgGrossArea": stats.get("avgGrossArea", "") or "",
+            "avgAirconArea": stats.get("avgAirconArea", "") or "",
+            "avgOccupants": stats.get("avgOccupants", "") or "",
+            "avgKwh": stats.get("avgKwh", "") or "",
+        },
+    }
+
     out_path = build_gemp_docx(data)
 
-    filename_year = (data.get("header", {}) or {}).get("year") or "report"
+    filename_year = data["header"].get("year") or "report"
     filename = f"gemp-annex-a-{filename_year}.docx"
 
     def cleanup_file(path: str):
@@ -924,6 +953,7 @@ def save_report_schedule(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+
 @app.post("/reports/email/send-plain-test")
 def send_plain_test_email(payload: SendPlainEmailIn):
     recipients = [r.strip().lower() for r in payload.recipients if r.strip()]
@@ -941,6 +971,7 @@ def send_plain_test_email(payload: SendPlainEmailIn):
 
     return {"ok": True, **result}
 
+
 @app.post("/reports/gemp/send-test")
 def send_test_gemp_report(
     payload: SendTestReportIn,
@@ -953,17 +984,22 @@ def send_test_gemp_report(
     if not recipients:
         raise HTTPException(status_code=400, detail="No active recipients configured")
 
-    report_payload = build_gemp_report_payload(db, device="pi4", field="power")
-    out_path = build_gemp_docx(report_payload)
+    try:
+        report_payload = build_gemp_report_payload(db, device="pi4", field="power")
+        out_path = build_gemp_docx(report_payload)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Report build failed: {e}")
 
     try:
         subject = "GEMP Report Test"
         body = "Attached is the test GEMP report."
-        send_email_with_attachment(recipients, subject, body, out_path)
+        result = send_email_with_attachment(recipients, subject, body, out_path)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"SMTP send failed: {e}")
     finally:
         try:
             os.remove(out_path)
         except Exception:
             pass
 
-    return {"ok": True, "sent_to": recipients}
+    return {"ok": True, **result}
