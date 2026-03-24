@@ -1,6 +1,7 @@
 import os
 import mimetypes
 import smtplib
+import ssl
 from email.message import EmailMessage
 from typing import List, Dict, Any
 
@@ -11,7 +12,9 @@ def _smtp_config() -> Dict[str, Any]:
     smtp_username = os.getenv("SMTP_USERNAME", "").strip()
     smtp_password = os.getenv("SMTP_PASSWORD", "").strip()
     smtp_from = os.getenv("SMTP_FROM", smtp_username).strip()
+
     use_starttls = os.getenv("SMTP_STARTTLS", "1").strip() == "1"
+    use_ssl = os.getenv("SMTP_SSL", "0").strip() == "1"
 
     if not smtp_host:
         raise RuntimeError("SMTP_HOST is missing")
@@ -29,7 +32,38 @@ def _smtp_config() -> Dict[str, Any]:
         "password": smtp_password,
         "from": smtp_from,
         "starttls": use_starttls,
+        "ssl": use_ssl,
     }
+
+
+def _send_message(msg: EmailMessage, cfg: Dict[str, Any]) -> None:
+    try:
+        if cfg["ssl"]:
+            context = ssl.create_default_context()
+            with smtplib.SMTP_SSL(cfg["host"], cfg["port"], timeout=30, context=context) as server:
+                server.ehlo()
+                server.login(cfg["username"], cfg["password"])
+                server.send_message(msg)
+        else:
+            with smtplib.SMTP(cfg["host"], cfg["port"], timeout=30) as server:
+                server.ehlo()
+                if cfg["starttls"]:
+                    context = ssl.create_default_context()
+                    server.starttls(context=context)
+                    server.ehlo()
+                server.login(cfg["username"], cfg["password"])
+                server.send_message(msg)
+
+    except smtplib.SMTPAuthenticationError as e:
+        raise RuntimeError(f"SMTP authentication failed: {e}") from e
+    except smtplib.SMTPConnectError as e:
+        raise RuntimeError(f"SMTP connect failed: {e}") from e
+    except smtplib.SMTPServerDisconnected as e:
+        raise RuntimeError(f"SMTP server disconnected: {e}") from e
+    except smtplib.SMTPException as e:
+        raise RuntimeError(f"SMTP error: {e}") from e
+    except Exception as e:
+        raise RuntimeError(f"Unexpected email send failure: {e}") from e
 
 
 def send_plain_email(
@@ -49,13 +83,7 @@ def send_plain_email(
     msg["Reply-To"] = cfg["from"]
     msg.set_content(body)
 
-    with smtplib.SMTP(cfg["host"], cfg["port"], timeout=30) as server:
-        server.ehlo()
-        if cfg["starttls"]:
-            server.starttls()
-            server.ehlo()
-        server.login(cfg["username"], cfg["password"])
-        server.send_message(msg)
+    _send_message(msg, cfg)
 
     return {
         "from": cfg["from"],
@@ -95,13 +123,7 @@ def send_email_with_attachment(
             filename=os.path.basename(attachment_path),
         )
 
-    with smtplib.SMTP(cfg["host"], cfg["port"], timeout=30) as server:
-        server.ehlo()
-        if cfg["starttls"]:
-            server.starttls()
-            server.ehlo()
-        server.login(cfg["username"], cfg["password"])
-        server.send_message(msg)
+    _send_message(msg, cfg)
 
     return {
         "from": cfg["from"],
