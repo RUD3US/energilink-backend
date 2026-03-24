@@ -41,7 +41,7 @@ ALLOWED_NOTE_FIELDS = {"power", "power_realtime"}
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-app = FastAPI(title="Power Backend", version="0.9.0")
+app = FastAPI(title="Power Backend", version="1.0.0")
 
 
 # -------------------------
@@ -183,6 +183,34 @@ def add_missing_columns(conn: sqlite3.Connection):
         addcol("ALTER TABLE notes ADD COLUMN verified INTEGER DEFAULT 0")
 
 
+def ensure_realtime_unique_index(conn: sqlite3.Connection):
+    rows = conn.execute(
+        """
+        SELECT device, field, time, MAX(id) AS keep_id
+        FROM realtime_points
+        GROUP BY device, field, time
+        """
+    ).fetchall()
+
+    keep_ids = {int(r["keep_id"]) for r in rows} if rows else set()
+
+    if keep_ids:
+        placeholders = ",".join("?" for _ in keep_ids)
+        conn.execute(
+            f"DELETE FROM realtime_points WHERE id NOT IN ({placeholders})",
+            tuple(keep_ids),
+        )
+        conn.commit()
+
+    try:
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_realtime_device_field_time ON realtime_points(device, field, time)"
+        )
+        conn.commit()
+    except Exception:
+        pass
+
+
 def normalize_note_target(metric: Optional[str], anchor_field: Optional[str]) -> Tuple[str, str]:
     metric_in = cleaned_str(metric) or NOTE_METRIC_CANONICAL
     if metric_in not in ALLOWED_NOTE_METRICS:
@@ -317,6 +345,7 @@ def startup():
         ensure_table(conn)
         add_missing_columns(conn)
         ensure_report_tables(conn)
+        ensure_realtime_unique_index(conn)
         conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
         conn.commit()
     finally:
@@ -356,6 +385,15 @@ class RealtimeIn(BaseModel):
 class RealtimeOut(BaseModel):
     time: str
     value: float
+
+
+class HistoryRowOut(BaseModel):
+    time: str
+    rms_voltage: Optional[float] = None
+    rms_current: Optional[float] = None
+    power: Optional[float] = None
+    power_factor: Optional[float] = None
+    note: Optional[str] = None
 
 
 class NoteCreateIn(BaseModel):
@@ -542,7 +580,7 @@ def ingest_metrics(payload: MetricsIn, db: sqlite3.Connection = Depends(get_db))
         rows.append((payload.device, "power_factor", t, float(payload.power_factor)))
 
     db.executemany(
-        "INSERT INTO realtime_points (device, field, time, value) VALUES (?, ?, ?, ?)",
+        "INSERT OR REPLACE INTO realtime_points (device, field, time, value) VALUES (?, ?, ?, ?)",
         rows,
     )
     db.commit()
@@ -600,7 +638,7 @@ def me(user=Depends(get_current_user)):
 def ingest_vrms(payload: RealtimeIn, db: sqlite3.Connection = Depends(get_db)):
     ts = payload.time.strip() if payload.time else now_iso()
     db.execute(
-        "INSERT INTO realtime_points (device, field, time, value) VALUES (?, ?, ?, ?)",
+        "INSERT OR REPLACE INTO realtime_points (device, field, time, value) VALUES (?, ?, ?, ?)",
         (payload.device, payload.field, ts, float(payload.value)),
     )
     db.commit()
@@ -638,6 +676,67 @@ def public_realtime(
     ).fetchall()
 
     return [{"time": r["time"], "value": float(r["value"]) * scale} for r in rows][::-1]
+
+
+@app.get("/public/history", response_model=List[HistoryRowOut])
+def public_history(
+    device: str = "pi4",
+    limit: int = 200,
+    db: sqlite3.Connection = Depends(get_db),
+):
+    limit = max(1, min(limit, 1000))
+
+    rows = db.execute(
+        """
+        WITH history_base AS (
+            SELECT
+                device,
+                time,
+                MAX(CASE WHEN field='rms_voltage' THEN value END) AS rms_voltage,
+                MAX(CASE WHEN field='rms_current' THEN value END) AS rms_current,
+                MAX(CASE WHEN field='power' THEN value END) AS power,
+                MAX(CASE WHEN field='power_factor' THEN value END) AS power_factor
+            FROM realtime_points
+            WHERE device=?
+            GROUP BY device, time
+        ),
+        note_base AS (
+            SELECT
+                device,
+                COALESCE(anchor_time, time) AS note_time,
+                GROUP_CONCAT(text, ' | ') AS note
+            FROM notes
+            WHERE device=?
+            GROUP BY device, COALESCE(anchor_time, time)
+        )
+        SELECT
+            h.time,
+            h.rms_voltage,
+            h.rms_current,
+            h.power,
+            h.power_factor,
+            n.note
+        FROM history_base h
+        LEFT JOIN note_base n
+            ON h.device = n.device
+           AND h.time = n.note_time
+        ORDER BY h.time DESC
+        LIMIT ?
+        """,
+        (device, device, limit),
+    ).fetchall()
+
+    return [
+        {
+            "time": r["time"],
+            "rms_voltage": float(r["rms_voltage"]) if r["rms_voltage"] is not None else None,
+            "rms_current": float(r["rms_current"]) if r["rms_current"] is not None else None,
+            "power": float(r["power"]) if r["power"] is not None else None,
+            "power_factor": float(r["power_factor"]) if r["power_factor"] is not None else None,
+            "note": r["note"],
+        }
+        for r in rows
+    ]
 
 
 @app.get("/public/notes", response_model=List[NoteOut])
