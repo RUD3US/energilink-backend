@@ -1,14 +1,27 @@
 import os
 import tempfile
 from typing import Any, Dict, List
+from xml.sax.saxutils import escape as xml_escape
 
 from docx import Document
-from docx.enum.section import WD_SECTION_START
 from docx.enum.table import WD_ALIGN_VERTICAL, WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Inches, Pt
+
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.platypus import (
+    Image as RLImage,
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
+)
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -38,6 +51,15 @@ def fmt(v: Any) -> str:
         return ""
     s = str(v).strip()
     return "" if s == "-" else s
+
+
+def _get_first(src: Dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in src and src.get(key) is not None:
+            value = src.get(key)
+            if str(value).strip() != "":
+                return value
+    return ""
 
 
 def set_cell_border(cell, **kwargs):
@@ -148,8 +170,8 @@ def build_month_rows(rows: List[Dict[str, Any]], stats: Dict[str, Any]) -> List[
         final_rows.append(
             {
                 "month": month,
-                "baseline2016": fmt(src.get("baseline2016")),
-                "buildingDescription": fmt(src.get("buildingDescription")),
+                "baseline2025": fmt(_get_first(src, "baseline2025", "baseline2016")),
+                "buildingDesc": fmt(_get_first(src, "buildingDesc", "buildingDescription")),
                 "grossArea": fmt(src.get("grossArea")),
                 "airconArea": fmt(src.get("airconArea")),
                 "occupants": fmt(src.get("occupants")),
@@ -160,8 +182,8 @@ def build_month_rows(rows: List[Dict[str, Any]], stats: Dict[str, Any]) -> List[
     final_rows.append(
         {
             "month": "Average",
-            "baseline2016": fmt(stats.get("avgBaseline")),
-            "buildingDescription": "",
+            "baseline2025": fmt(stats.get("avgBaseline")),
+            "buildingDesc": "",
             "grossArea": fmt(stats.get("avgGrossArea")),
             "airconArea": fmt(stats.get("avgAirconArea")),
             "occupants": fmt(stats.get("avgOccupants")),
@@ -190,7 +212,6 @@ def build_gemp_docx(payload: Dict[str, Any]) -> str:
     normal.font.name = "Arial"
     normal.font.size = Pt(10)
 
-    # Top right ANNEX A
     p_annex = doc.add_paragraph()
     p_annex.alignment = WD_ALIGN_PARAGRAPH.RIGHT
     run_annex = p_annex.add_run('"ANNEX A"')
@@ -198,7 +219,6 @@ def build_gemp_docx(payload: Dict[str, Any]) -> str:
     run_annex.font.name = "Arial"
     run_annex.font.size = Pt(13)
 
-    # Logo
     if os.path.exists(GEMP_LOGO_PATH):
         p_logo = doc.add_paragraph()
         p_logo.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -253,7 +273,6 @@ def build_gemp_docx(payload: Dict[str, Any]) -> str:
 
     doc.add_paragraph()
 
-    # Header info block
     info_table = doc.add_table(rows=3, cols=2)
     info_table.alignment = WD_TABLE_ALIGNMENT.CENTER
     info_table.autofit = False
@@ -281,7 +300,6 @@ def build_gemp_docx(payload: Dict[str, Any]) -> str:
 
     doc.add_paragraph()
 
-    # Main table
     table = doc.add_table(rows=2, cols=7)
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
     table.autofit = False
@@ -332,8 +350,8 @@ def build_gemp_docx(payload: Dict[str, Any]) -> str:
         row_cells = table.add_row().cells
         values = [
             fmt(r.get("month")),
-            fmt(r.get("baseline2016")),
-            fmt(r.get("buildingDescription")),
+            fmt(r.get("baseline2025")),
+            fmt(r.get("buildingDesc")),
             fmt(r.get("grossArea")),
             fmt(r.get("airconArea")),
             fmt(r.get("occupants")),
@@ -360,7 +378,11 @@ def build_gemp_docx(payload: Dict[str, Any]) -> str:
     doc.add_paragraph()
     doc.add_paragraph()
 
-    # Signature block
+    prepared_by = fmt(header.get("preparedBy"))
+    prepared_by_designation = fmt(header.get("preparedByDesignation")) or "Designation"
+    noted_by = fmt(header.get("notedBy"))
+    noted_by_designation = fmt(header.get("notedByDesignation")) or "Designation"
+
     sign_table = doc.add_table(rows=2, cols=2)
     sign_table.alignment = WD_TABLE_ALIGNMENT.CENTER
     sign_table.autofit = False
@@ -380,18 +402,235 @@ def build_gemp_docx(payload: Dict[str, Any]) -> str:
     left2.text = ""
     p1 = left2.paragraphs[0]
     p1.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    r1 = p1.add_run("\n\n_______________________________\nDesignation")
+    r1 = p1.add_run(
+        f"\n\n{prepared_by if prepared_by else '_______________________________'}\n{prepared_by_designation}"
+    )
     r1.font.name = "Arial"
     r1.font.size = Pt(10)
 
     right2.text = ""
     p2 = right2.paragraphs[0]
     p2.alignment = WD_ALIGN_PARAGRAPH.LEFT
-    r2 = p2.add_run("\n\n_______________________________\nDesignation")
+    r2 = p2.add_run(
+        f"\n\n{noted_by if noted_by else '_______________________________'}\n{noted_by_designation}"
+    )
     r2.font.name = "Arial"
     r2.font.size = Pt(10)
 
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".docx")
     tmp.close()
     doc.save(tmp.name)
+    return tmp.name
+
+
+def _p_style(name: str, size: int = 9, bold: bool = False, align: int = TA_LEFT):
+    return ParagraphStyle(
+        name=name,
+        fontName="Helvetica-Bold" if bold else "Helvetica",
+        fontSize=size,
+        leading=size + 1,
+        alignment=align,
+        spaceBefore=0,
+        spaceAfter=0,
+    )
+
+
+def _p(text: str, style: ParagraphStyle):
+    return Paragraph(xml_escape(text).replace("\n", "<br/>"), style)
+
+
+def build_gemp_pdf(payload: Dict[str, Any]) -> str:
+    header = payload.get("header", {}) or {}
+    rows = payload.get("rows", []) or []
+    stats = payload.get("stats", {}) or {}
+    year = fmt(header.get("year")) or "2020"
+
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+    tmp.close()
+
+    doc = SimpleDocTemplate(
+        tmp.name,
+        pagesize=A4,
+        leftMargin=28,
+        rightMargin=28,
+        topMargin=18,
+        bottomMargin=24,
+    )
+
+    story = []
+
+    annex_style = _p_style("annex", size=12, bold=True, align=TA_RIGHT)
+    center_12_bold = _p_style("center12bold", size=12, bold=True, align=TA_CENTER)
+    center_10_bold = _p_style("center10bold", size=10, bold=True, align=TA_CENTER)
+    center_11_bold = _p_style("center11bold", size=11, bold=True, align=TA_CENTER)
+    info_style = _p_style("info", size=9, bold=False, align=TA_LEFT)
+    table_hdr = _p_style("table_hdr", size=7, bold=False, align=TA_CENTER)
+    table_letter = _p_style("table_letter", size=7, bold=True, align=TA_CENTER)
+    table_left = _p_style("table_left", size=7, bold=False, align=TA_LEFT)
+    table_center = _p_style("table_center", size=7, bold=False, align=TA_CENTER)
+    table_avg_left = _p_style("table_avg_left", size=7, bold=True, align=TA_LEFT)
+    table_avg_center = _p_style("table_avg_center", size=7, bold=True, align=TA_CENTER)
+    sign_lbl = _p_style("sign_lbl", size=9, bold=True, align=TA_LEFT)
+    sign_name = _p_style("sign_name", size=9, bold=False, align=TA_LEFT)
+    sign_desig = _p_style("sign_desig", size=9, bold=False, align=TA_LEFT)
+
+    story.append(Paragraph('"ANNEX A"', annex_style))
+    story.append(Spacer(1, 4))
+
+    if os.path.exists(GEMP_LOGO_PATH):
+        try:
+            logo = RLImage(GEMP_LOGO_PATH, width=44, height=44)
+            logo.hAlign = "CENTER"
+            story.append(logo)
+            story.append(Spacer(1, 6))
+        except Exception:
+            pass
+
+    story.append(Paragraph("DEPARTMENT OF ENERGY", center_12_bold))
+    story.append(
+        Paragraph(
+            "Energy Center, Rizal Drive, Bonifacio Global City, Taguig City",
+            center_10_bold,
+        )
+    )
+    story.append(
+        Paragraph(
+            "Telefax: (632) 8840-2243,  Email: doe.gemp@gmail.com",
+            center_10_bold,
+        )
+    )
+    story.append(Spacer(1, 10))
+    story.append(Paragraph("GOVERNMENT ENERGY MANAGEMENT PROGRAM", center_12_bold))
+    story.append(Paragraph(f"Monthly Electricity Consumption Report, {year}", center_11_bold))
+    story.append(Spacer(1, 10))
+
+    info_data = [
+        [
+            Paragraph(f"<b>Agency:</b> {xml_escape(fmt(header.get('agency')))}", info_style),
+            Paragraph(f"<b>Tel. Nos.:</b> {xml_escape(fmt(header.get('tel')))}", info_style),
+        ],
+        [
+            Paragraph(f"<b>Address:</b> {xml_escape(fmt(header.get('address')))}", info_style),
+            Paragraph(f"<b>Fax Nos.:</b> {xml_escape(fmt(header.get('fax')))}", info_style),
+        ],
+        [
+            Paragraph(f"<b>Region:</b> {xml_escape(fmt(header.get('region')))}", info_style),
+            Paragraph("", info_style),
+        ],
+    ]
+
+    info_table = Table(info_data, colWidths=[doc.width / 2.0, doc.width / 2.0])
+    info_table.setStyle(
+        TableStyle(
+            [
+                ("GRID", (0, 0), (-1, -1), 0.6, colors.black),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 4),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                ("TOPPADDING", (0, 0), (-1, -1), 2),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+            ]
+        )
+    )
+    story.append(info_table)
+    story.append(Spacer(1, 14))
+
+    full_rows = build_month_rows(rows, stats)
+
+    col_widths = [58, 84, 82, 76, 92, 74, 73]
+
+    table_data = [
+        [
+            Paragraph("A", table_letter),
+            Paragraph("B", table_letter),
+            Paragraph("C", table_letter),
+            Paragraph("D", table_letter),
+            Paragraph("E", table_letter),
+            Paragraph("F", table_letter),
+            Paragraph("G", table_letter),
+        ],
+        [
+            Paragraph("Month", table_hdr),
+            Paragraph("Monthly<br/>Consumption<br/>Baseline, 2015", table_hdr),
+            Paragraph("Building<br/>Description", table_hdr),
+            Paragraph("Gross Area<br/>(Square meters)", table_hdr),
+            Paragraph("Air-Conditioned<br/>Area<br/>(square meters)", table_hdr),
+            Paragraph("Number of<br/>Occupants", table_hdr),
+            Paragraph("Monthly Consumption,<br/>kWh", table_hdr),
+        ],
+    ]
+
+    for row in full_rows:
+        is_avg = fmt(row.get("month")) == "Average"
+        left_style = table_avg_left if is_avg else table_left
+        center_style = table_avg_center if is_avg else table_center
+
+        table_data.append(
+            [
+                Paragraph(xml_escape(fmt(row.get("month"))), left_style),
+                Paragraph(xml_escape(fmt(row.get("baseline2025"))), center_style),
+                Paragraph(xml_escape(fmt(row.get("buildingDesc"))), left_style),
+                Paragraph(xml_escape(fmt(row.get("grossArea"))), center_style),
+                Paragraph(xml_escape(fmt(row.get("airconArea"))), center_style),
+                Paragraph(xml_escape(fmt(row.get("occupants"))), center_style),
+                Paragraph(xml_escape(fmt(row.get("kwh"))), center_style),
+            ]
+        )
+
+    main_table = Table(table_data, colWidths=col_widths, repeatRows=2)
+    main_table.setStyle(
+        TableStyle(
+            [
+                ("GRID", (0, 0), (-1, -1), 0.6, colors.black),
+                ("BACKGROUND", (0, 1), (-1, 1), colors.HexColor("#F2F2F2")),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("ALIGN", (0, 0), (-1, 1), "CENTER"),
+                ("ALIGN", (0, 2), (0, -1), "LEFT"),
+                ("ALIGN", (2, 2), (2, -1), "LEFT"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 3),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+                ("TOPPADDING", (0, 0), (-1, -1), 2),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+            ]
+        )
+    )
+    story.append(main_table)
+    story.append(Spacer(1, 22))
+
+    prepared_by = fmt(header.get("preparedBy"))
+    prepared_by_designation = fmt(header.get("preparedByDesignation")) or "Designation"
+    noted_by = fmt(header.get("notedBy"))
+    noted_by_designation = fmt(header.get("notedByDesignation")) or "Designation"
+
+    sign_table = Table(
+        [
+            [Paragraph("Prepared by:", sign_lbl), Paragraph("Noted by:", sign_lbl)],
+            [
+                Paragraph(xml_escape(prepared_by if prepared_by else " "), sign_name),
+                Paragraph(xml_escape(noted_by if noted_by else " "), sign_name),
+            ],
+            [
+                Paragraph(xml_escape(prepared_by_designation), sign_desig),
+                Paragraph(xml_escape(noted_by_designation), sign_desig),
+            ],
+        ],
+        colWidths=[doc.width / 2.0, doc.width / 2.0],
+    )
+    sign_table.setStyle(
+        TableStyle(
+            [
+                ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#D0D0D0")),
+                ("LINEBELOW", (0, 1), (0, 1), 0.8, colors.black),
+                ("LINEBELOW", (1, 1), (1, 1), 0.8, colors.black),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 4),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                ("TOPPADDING", (0, 0), (-1, -1), 3),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ]
+        )
+    )
+    story.append(sign_table)
+
+    doc.build(story)
     return tmp.name
