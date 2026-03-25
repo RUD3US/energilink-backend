@@ -1101,10 +1101,13 @@ def send_plain_test_email(payload: SendPlainEmailIn):
 
 @app.post("/reports/gemp/send-test")
 def send_test_gemp_report(
-    payload: SendTestReportIn,
+    payload: Optional[SendTestReportIn] = None,
     db: sqlite3.Connection = Depends(get_db),
 ):
-    recipients = [r.strip().lower() for r in (payload.recipients or []) if r.strip()]
+    recipients = []
+    if payload and payload.recipients:
+        recipients = [r.strip().lower() for r in payload.recipients if r.strip()]
+
     if not recipients:
         recipients = get_active_recipient_emails(db)
 
@@ -1129,4 +1132,4 @@ def send_test_gemp_report(
         except Exception:
             pass
 
-    return {"ok": True, **result}
+    return {"ok": True, "sent_to": recipients, **result}
