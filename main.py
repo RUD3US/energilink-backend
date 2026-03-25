@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from gemp_docx import build_gemp_docx
+from gemp_docx import build_gemp_docx, build_gemp_pdf
 from email_sender import send_plain_email, send_email_with_attachment
 from gemp_reporting import (
     ensure_report_tables,
@@ -335,6 +335,49 @@ def get_current_user(
         raise HTTPException(status_code=401, detail="User not found")
 
     return {"id": int(row["id"]), "email": row["email"]}
+
+
+def normalize_gemp_payload(raw: Dict[str, Any]) -> Dict[str, Any]:
+    header = raw.get("header", {}) or {}
+    rows = raw.get("rows", []) or []
+    stats = raw.get("stats", {}) or {}
+
+    normalized_rows = []
+    for row in rows:
+        normalized_rows.append(
+            {
+                "month": row.get("month", "") or "",
+                "baseline2025": row.get("baseline2025", "") or "",
+                "buildingDesc": row.get("buildingDesc", "") or "",
+                "grossArea": row.get("grossArea", "") or "",
+                "airconArea": row.get("airconArea", "") or "",
+                "occupants": row.get("occupants", "") or "",
+                "kwh": row.get("kwh", "") or "",
+            }
+        )
+
+    return {
+        "header": {
+            "year": header.get("year", "") or "",
+            "agency": header.get("agency", "") or "",
+            "tel": header.get("tel", "") or "",
+            "address": header.get("address", "") or "",
+            "fax": header.get("fax", "") or "",
+            "region": header.get("region", "") or "",
+            "preparedBy": header.get("preparedBy", "") or "",
+            "preparedByDesignation": header.get("preparedByDesignation", "") or "",
+            "notedBy": header.get("notedBy", "") or "",
+            "notedByDesignation": header.get("notedByDesignation", "") or "",
+        },
+        "rows": normalized_rows,
+        "stats": {
+            "avgBaseline": stats.get("avgBaseline", "") or "",
+            "avgGrossArea": stats.get("avgGrossArea", "") or "",
+            "avgAirconArea": stats.get("avgAirconArea", "") or "",
+            "avgOccupants": stats.get("avgOccupants", "") or "",
+            "avgKwh": stats.get("avgKwh", "") or "",
+        },
+    }
 
 
 @app.on_event("startup")
@@ -943,47 +986,7 @@ def current_month_kwh_summary(
 @app.post("/reports/gemp/docx")
 def export_gemp_docx(payload: GempReportIn, background_tasks: BackgroundTasks):
     raw = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
-
-    header = raw.get("header", {}) or {}
-    rows = raw.get("rows", []) or []
-    stats = raw.get("stats", {}) or {}
-
-    normalized_rows = []
-    for row in rows:
-        normalized_rows.append(
-            {
-                "month": row.get("month", ""),
-                "baseline2025": row.get("baseline2025", "") or "",
-                "buildingDesc": row.get("buildingDesc", "") or "",
-                "grossArea": row.get("grossArea", "") or "",
-                "airconArea": row.get("airconArea", "") or "",
-                "occupants": row.get("occupants", "") or "",
-                "kwh": row.get("kwh", "") or "",
-            }
-        )
-
-    data = {
-        "header": {
-            "year": header.get("year", "") or "",
-            "agency": header.get("agency", "") or "",
-            "tel": header.get("tel", "") or "",
-            "address": header.get("address", "") or "",
-            "fax": header.get("fax", "") or "",
-            "region": header.get("region", "") or "",
-            "preparedBy": header.get("preparedBy", "") or "",
-            "preparedByDesignation": header.get("preparedByDesignation", "") or "",
-            "notedBy": header.get("notedBy", "") or "",
-            "notedByDesignation": header.get("notedByDesignation", "") or "",
-        },
-        "rows": normalized_rows,
-        "stats": {
-            "avgBaseline": stats.get("avgBaseline", "") or "",
-            "avgGrossArea": stats.get("avgGrossArea", "") or "",
-            "avgAirconArea": stats.get("avgAirconArea", "") or "",
-            "avgOccupants": stats.get("avgOccupants", "") or "",
-            "avgKwh": stats.get("avgKwh", "") or "",
-        },
-    }
+    data = normalize_gemp_payload(raw)
 
     out_path = build_gemp_docx(data)
 
@@ -1002,6 +1005,31 @@ def export_gemp_docx(payload: GempReportIn, background_tasks: BackgroundTasks):
         path=out_path,
         filename=filename,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+
+
+@app.post("/reports/gemp/pdf")
+def export_gemp_pdf(payload: GempReportIn, background_tasks: BackgroundTasks):
+    raw = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
+    data = normalize_gemp_payload(raw)
+
+    out_path = build_gemp_pdf(data)
+
+    filename_year = data["header"].get("year") or "report"
+    filename = f"gemp-annex-a-{filename_year}.pdf"
+
+    def cleanup_file(path: str):
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+
+    background_tasks.add_task(cleanup_file, out_path)
+
+    return FileResponse(
+        path=out_path,
+        filename=filename,
+        media_type="application/pdf",
     )
 
 
@@ -1085,13 +1113,13 @@ def send_test_gemp_report(
 
     try:
         report_payload = build_gemp_report_payload(db, device="pi4", field="power")
-        out_path = build_gemp_docx(report_payload)
+        out_path = build_gemp_pdf(report_payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Report build failed: {e}")
 
     try:
         subject = "GEMP Report Test"
-        body = "Attached is the test GEMP report."
+        body = "Attached is the test GEMP report in PDF format."
         result = send_email_with_attachment(recipients, subject, body, out_path)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"SMTP send failed: {e}")
