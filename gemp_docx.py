@@ -23,7 +23,6 @@ from reportlab.platypus import (
     TableStyle,
 )
 
-
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 GEMP_LOGO_PATH = os.getenv(
     "GEMP_LOGO_PATH",
@@ -73,14 +72,14 @@ def set_cell_border(cell, **kwargs):
     for edge in ("top", "left", "bottom", "right"):
         if edge in kwargs:
             edge_data = kwargs.get(edge)
-            tag = "w:{}".format(edge)
+            tag = f"w:{edge}"
             element = tcBorders.find(qn(tag))
             if element is None:
                 element = OxmlElement(tag)
                 tcBorders.append(element)
             for key in ["val", "sz", "space", "color"]:
                 if key in edge_data:
-                    element.set(qn("w:{}".format(key)), str(edge_data[key]))
+                    element.set(qn(f"w:{key}"), str(edge_data[key]))
 
 
 def shade_cell(cell, fill: str):
@@ -435,10 +434,6 @@ def _p_style(name: str, size: int = 9, bold: bool = False, align: int = TA_LEFT)
     )
 
 
-def _p(text: str, style: ParagraphStyle):
-    return Paragraph(xml_escape(text).replace("\n", "<br/>"), style)
-
-
 def build_gemp_pdf(payload: Dict[str, Any]) -> str:
     header = payload.get("header", {}) or {}
     rows = payload.get("rows", []) or []
@@ -457,8 +452,6 @@ def build_gemp_pdf(payload: Dict[str, Any]) -> str:
         bottomMargin=24,
     )
 
-    story = []
-
     annex_style = _p_style("annex", size=12, bold=True, align=TA_RIGHT)
     center_12_bold = _p_style("center12bold", size=12, bold=True, align=TA_CENTER)
     center_10_bold = _p_style("center10bold", size=10, bold=True, align=TA_CENTER)
@@ -473,6 +466,8 @@ def build_gemp_pdf(payload: Dict[str, Any]) -> str:
     sign_lbl = _p_style("sign_lbl", size=9, bold=True, align=TA_LEFT)
     sign_name = _p_style("sign_name", size=9, bold=False, align=TA_LEFT)
     sign_desig = _p_style("sign_desig", size=9, bold=False, align=TA_LEFT)
+
+    story = []
 
     story.append(Paragraph('"ANNEX A"', annex_style))
     story.append(Spacer(1, 4))
