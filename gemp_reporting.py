@@ -315,8 +315,8 @@ def build_gemp_report_payload(
         rows.append(
             {
                 "month": month,
-                "baseline2016": "",
-                "buildingDescription": "",
+                "baseline2025": "",
+                "buildingDesc": "",
                 "grossArea": "",
                 "airconArea": "",
                 "occupants": "",
@@ -334,6 +334,10 @@ def build_gemp_report_payload(
             "address": os.getenv("GEMP_ADDRESS", ""),
             "fax": os.getenv("GEMP_FAX", ""),
             "region": os.getenv("GEMP_REGION", ""),
+            "preparedBy": os.getenv("GEMP_PREPARED_BY", ""),
+            "preparedByDesignation": os.getenv("GEMP_PREPARED_BY_DESIGNATION", ""),
+            "notedBy": os.getenv("GEMP_NOTED_BY", ""),
+            "notedByDesignation": os.getenv("GEMP_NOTED_BY_DESIGNATION", ""),
         },
         "rows": rows,
         "stats": {
@@ -344,7 +348,6 @@ def build_gemp_report_payload(
             "avgKwh": avg_kwh,
         },
     }
-
 
 def schedule_key_for_now(schedule: Dict[str, Any], now_local: datetime) -> Optional[str]:
     if not schedule.get("enabled"):
