@@ -1,4 +1,5 @@
 import os
+import json
 import sqlite3
 import calendar
 from datetime import datetime, timedelta, timezone
@@ -97,6 +98,16 @@ def ensure_report_tables(conn: sqlite3.Connection):
         """
     )
 
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS gemp_report_config (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            updated_at TEXT NOT NULL
+        );
+        """
+    )
+
     row = conn.execute("SELECT 1 FROM report_schedule WHERE id=1").fetchone()
     if not row:
         conn.execute(
@@ -106,6 +117,16 @@ def ensure_report_tables(conn: sqlite3.Connection):
             ) VALUES (1, 'weekly', '08:00', 0, 1, 0, ?)
             """,
             (now_iso(),),
+        )
+
+    row = conn.execute("SELECT 1 FROM gemp_report_config WHERE id=1").fetchone()
+    if not row:
+        conn.execute(
+            """
+            INSERT INTO gemp_report_config (id, payload_json, updated_at)
+            VALUES (1, ?, ?)
+            """,
+            (json.dumps({}), now_iso()),
         )
 
     conn.commit()
@@ -216,6 +237,176 @@ def upsert_report_schedule(
     return get_report_schedule(conn)
 
 
+def normalize_gemp_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    row_map = {}
+    for row in rows or []:
+        month = str(row.get("month", "")).strip()
+        if month:
+            row_map[month] = row
+
+    normalized = []
+    for month in MONTHS:
+        src = row_map.get(month, {})
+        normalized.append(
+            {
+                "month": month,
+                "baseline2025": str(src.get("baseline2025", "") or "").strip(),
+                "buildingDesc": str(src.get("buildingDesc", "") or "").strip(),
+                "grossArea": str(src.get("grossArea", "") or "").strip(),
+                "airconArea": str(src.get("airconArea", "") or "").strip(),
+                "occupants": str(src.get("occupants", "") or "").strip(),
+                "kwh": str(src.get("kwh", "") or "").strip(),
+            }
+        )
+    return normalized
+
+
+def empty_gemp_payload() -> Dict[str, Any]:
+    return {
+        "header": {
+            "year": "",
+            "agency": "",
+            "tel": "",
+            "address": "",
+            "fax": "",
+            "region": "",
+            "preparedBy": "",
+            "preparedByDesignation": "",
+            "notedBy": "",
+            "notedByDesignation": "",
+        },
+        "rows": normalize_gemp_rows([]),
+        "stats": {
+            "avgBaseline": "",
+            "avgGrossArea": "",
+            "avgAirconArea": "",
+            "avgOccupants": "",
+            "avgKwh": "",
+        },
+    }
+
+
+def get_gemp_report_config(conn: sqlite3.Connection) -> Dict[str, Any]:
+    ensure_report_tables(conn)
+
+    row = conn.execute(
+        "SELECT payload_json, updated_at FROM gemp_report_config WHERE id=1"
+    ).fetchone()
+
+    if not row:
+        payload = empty_gemp_payload()
+        return {"payload": payload, "updated_at": now_iso()}
+
+    try:
+        payload = json.loads(row["payload_json"] or "{}")
+    except Exception:
+        payload = {}
+
+    header = payload.get("header", {}) or {}
+    rows = normalize_gemp_rows(payload.get("rows", []) or [])
+    stats = payload.get("stats", {}) or {}
+
+    normalized_payload = {
+        "header": {
+            "year": str(header.get("year", "") or "").strip(),
+            "agency": str(header.get("agency", "") or "").strip(),
+            "tel": str(header.get("tel", "") or "").strip(),
+            "address": str(header.get("address", "") or "").strip(),
+            "fax": str(header.get("fax", "") or "").strip(),
+            "region": str(header.get("region", "") or "").strip(),
+            "preparedBy": str(header.get("preparedBy", "") or "").strip(),
+            "preparedByDesignation": str(header.get("preparedByDesignation", "") or "").strip(),
+            "notedBy": str(header.get("notedBy", "") or "").strip(),
+            "notedByDesignation": str(header.get("notedByDesignation", "") or "").strip(),
+        },
+        "rows": rows,
+        "stats": {
+            "avgBaseline": str(stats.get("avgBaseline", "") or "").strip(),
+            "avgGrossArea": str(stats.get("avgGrossArea", "") or "").strip(),
+            "avgAirconArea": str(stats.get("avgAirconArea", "") or "").strip(),
+            "avgOccupants": str(stats.get("avgOccupants", "") or "").strip(),
+            "avgKwh": str(stats.get("avgKwh", "") or "").strip(),
+        },
+    }
+
+    return {
+        "payload": normalized_payload,
+        "updated_at": row["updated_at"],
+    }
+
+
+def save_gemp_report_config(conn: sqlite3.Connection, payload: Dict[str, Any]) -> Dict[str, Any]:
+    ensure_report_tables(conn)
+
+    header = payload.get("header", {}) or {}
+    rows = normalize_gemp_rows(payload.get("rows", []) or [])
+    stats = payload.get("stats", {}) or {}
+
+    normalized_payload = {
+        "header": {
+            "year": str(header.get("year", "") or "").strip(),
+            "agency": str(header.get("agency", "") or "").strip(),
+            "tel": str(header.get("tel", "") or "").strip(),
+            "address": str(header.get("address", "") or "").strip(),
+            "fax": str(header.get("fax", "") or "").strip(),
+            "region": str(header.get("region", "") or "").strip(),
+            "preparedBy": str(header.get("preparedBy", "") or "").strip(),
+            "preparedByDesignation": str(header.get("preparedByDesignation", "") or "").strip(),
+            "notedBy": str(header.get("notedBy", "") or "").strip(),
+            "notedByDesignation": str(header.get("notedByDesignation", "") or "").strip(),
+        },
+        "rows": rows,
+        "stats": {
+            "avgBaseline": str(stats.get("avgBaseline", "") or "").strip(),
+            "avgGrossArea": str(stats.get("avgGrossArea", "") or "").strip(),
+            "avgAirconArea": str(stats.get("avgAirconArea", "") or "").strip(),
+            "avgOccupants": str(stats.get("avgOccupants", "") or "").strip(),
+            "avgKwh": str(stats.get("avgKwh", "") or "").strip(),
+        },
+    }
+
+    conn.execute(
+        """
+        UPDATE gemp_report_config
+        SET payload_json=?, updated_at=?
+        WHERE id=1
+        """,
+        (json.dumps(normalized_payload), now_iso()),
+    )
+    conn.commit()
+
+    return get_gemp_report_config(conn)
+
+
+def _parse_float(v: Any) -> Optional[float]:
+    try:
+        s = str(v).strip()
+        if not s:
+            return None
+        return float(s)
+    except Exception:
+        return None
+
+
+def _avg_str(values: List[Optional[float]]) -> str:
+    valid = [v for v in values if v is not None]
+    if not valid:
+        return ""
+    return f"{sum(valid) / len(valid):.2f}"
+
+
+def compute_stats_from_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    monthly_rows = [r for r in rows if str(r.get("month", "")).strip() != "Average"]
+
+    return {
+        "avgBaseline": _avg_str([_parse_float(r.get("baseline2025")) for r in monthly_rows]),
+        "avgGrossArea": _avg_str([_parse_float(r.get("grossArea")) for r in monthly_rows]),
+        "avgAirconArea": _avg_str([_parse_float(r.get("airconArea")) for r in monthly_rows]),
+        "avgOccupants": _avg_str([_parse_float(r.get("occupants")) for r in monthly_rows]),
+        "avgKwh": _avg_str([_parse_float(r.get("kwh")) for r in monthly_rows]),
+    }
+
+
 def load_recent_field_points(
     conn: sqlite3.Connection,
     device: str,
@@ -306,48 +497,49 @@ def build_gemp_report_payload(
     field: str = "power",
 ) -> Dict[str, Any]:
     dynamic = compute_gemp_dynamic(conn, device=device, field=field)
+    saved = get_gemp_report_config(conn)["payload"]
 
     current_year = str(datetime.now(ZoneInfo(REPORT_TZ)).year)
     current_month = dynamic["current_month_label"]
 
+    saved_header = saved.get("header", {}) or {}
+    saved_rows = normalize_gemp_rows(saved.get("rows", []) or [])
+    row_map = {str(r.get("month", "")).strip(): r for r in saved_rows}
+
     rows = []
     for month in MONTHS:
+        src = row_map.get(month, {})
         rows.append(
             {
                 "month": month,
-                "baseline2025": "",
-                "buildingDesc": "",
-                "grossArea": "",
-                "airconArea": "",
-                "occupants": "",
-                "kwh": f"{dynamic['current_month_kwh']:.2f}" if month == current_month else "",
+                "baseline2025": str(src.get("baseline2025", "") or "").strip(),
+                "buildingDesc": str(src.get("buildingDesc", "") or "").strip(),
+                "grossArea": str(src.get("grossArea", "") or "").strip(),
+                "airconArea": str(src.get("airconArea", "") or "").strip(),
+                "occupants": str(src.get("occupants", "") or "").strip(),
+                "kwh": f"{dynamic['current_month_kwh']:.2f}" if month == current_month else str(src.get("kwh", "") or "").strip(),
             }
         )
 
-    avg_kwh = f"{dynamic['current_month_kwh']:.2f}" if dynamic["current_month_kwh"] > 0 else ""
+    stats = compute_stats_from_rows(rows)
 
     return {
         "header": {
-            "year": current_year,
-            "agency": os.getenv("GEMP_AGENCY", "GEMP Agency Name"),
-            "tel": os.getenv("GEMP_TEL", ""),
-            "address": os.getenv("GEMP_ADDRESS", ""),
-            "fax": os.getenv("GEMP_FAX", ""),
-            "region": os.getenv("GEMP_REGION", ""),
-            "preparedBy": os.getenv("GEMP_PREPARED_BY", ""),
-            "preparedByDesignation": os.getenv("GEMP_PREPARED_BY_DESIGNATION", ""),
-            "notedBy": os.getenv("GEMP_NOTED_BY", ""),
-            "notedByDesignation": os.getenv("GEMP_NOTED_BY_DESIGNATION", ""),
+            "year": str(saved_header.get("year") or current_year),
+            "agency": str(saved_header.get("agency") or os.getenv("GEMP_AGENCY", "GEMP Agency Name")),
+            "tel": str(saved_header.get("tel") or os.getenv("GEMP_TEL", "")),
+            "address": str(saved_header.get("address") or os.getenv("GEMP_ADDRESS", "")),
+            "fax": str(saved_header.get("fax") or os.getenv("GEMP_FAX", "")),
+            "region": str(saved_header.get("region") or os.getenv("GEMP_REGION", "")),
+            "preparedBy": str(saved_header.get("preparedBy") or ""),
+            "preparedByDesignation": str(saved_header.get("preparedByDesignation") or ""),
+            "notedBy": str(saved_header.get("notedBy") or ""),
+            "notedByDesignation": str(saved_header.get("notedByDesignation") or ""),
         },
         "rows": rows,
-        "stats": {
-            "avgBaseline": "",
-            "avgGrossArea": "",
-            "avgAirconArea": "",
-            "avgOccupants": "",
-            "avgKwh": avg_kwh,
-        },
+        "stats": stats,
     }
+
 
 def schedule_key_for_now(schedule: Dict[str, Any], now_local: datetime) -> Optional[str]:
     if not schedule.get("enabled"):
