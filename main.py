@@ -22,11 +22,10 @@ from gemp_reporting import (
     get_active_recipient_emails,
     compute_gemp_dynamic,
     build_gemp_report_payload,
+    get_gemp_report_config,
+    save_gemp_report_config,
 )
 
-# =========================
-# CONFIG
-# =========================
 DB_PATH = os.getenv("DB_PATH", "/var/data/app.db")
 JWT_SECRET = os.getenv("JWT_SECRET", "").strip()
 JWT_ALG = "HS256"
@@ -44,9 +43,6 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 app = FastAPI(title="Power Backend", version="1.0.0")
 
 
-# -------------------------
-# CORS
-# -------------------------
 if CORS_ORIGINS == "*" or CORS_ORIGINS == "":
     allow_origins = ["*"]
     allow_credentials = False
@@ -63,9 +59,6 @@ app.add_middleware(
 )
 
 
-# =========================
-# HELPERS
-# =========================
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -395,9 +388,6 @@ def startup():
         conn.close()
 
 
-# =========================
-# MODELS
-# =========================
 class SendPlainEmailIn(BaseModel):
     recipients: List[str]
     subject: str = "EnergiLink SMTP test"
@@ -571,9 +561,6 @@ class SendTestReportIn(BaseModel):
     recipients: Optional[List[str]] = None
 
 
-# =========================
-# ROUTES
-# =========================
 @app.get("/health")
 def health(db: sqlite3.Connection = Depends(get_db)):
     try:
@@ -991,7 +978,7 @@ def export_gemp_docx(payload: GempReportIn, background_tasks: BackgroundTasks):
     out_path = build_gemp_docx(data)
 
     filename_year = data["header"].get("year") or "report"
-    filename = f"gemp-annex-a-{filename_year}.docx"
+    filename = f"gemp_report_{filename_year}.docx"
 
     def cleanup_file(path: str):
         try:
@@ -1016,7 +1003,7 @@ def export_gemp_pdf(payload: GempReportIn, background_tasks: BackgroundTasks):
     out_path = build_gemp_pdf(data)
 
     filename_year = data["header"].get("year") or "report"
-    filename = f"gemp-annex-a-{filename_year}.pdf"
+    filename = f"gemp_report_{filename_year}.pdf"
 
     def cleanup_file(path: str):
         try:
@@ -1031,6 +1018,21 @@ def export_gemp_pdf(payload: GempReportIn, background_tasks: BackgroundTasks):
         filename=filename,
         media_type="application/pdf",
     )
+
+
+@app.get("/reports/gemp/config")
+def read_gemp_config(db: sqlite3.Connection = Depends(get_db)):
+    return get_gemp_report_config(db)
+
+
+@app.put("/reports/gemp/config")
+def update_gemp_config(
+    payload: GempReportIn,
+    db: sqlite3.Connection = Depends(get_db),
+):
+    raw = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
+    data = normalize_gemp_payload(raw)
+    return save_gemp_report_config(db, data)
 
 
 @app.get("/reports/settings/recipients", response_model=List[ReportRecipientOut])
