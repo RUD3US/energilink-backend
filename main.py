@@ -140,10 +140,26 @@ def ensure_table(conn: sqlite3.Connection):
     )
 
     conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS monthly_billing_rates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            year INTEGER NOT NULL,
+            month INTEGER NOT NULL,
+            cost_per_kwh REAL NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(year, month)
+        );
+        """
+    )
+
+    conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_notes_device_metric_time ON notes(device, metric, time)"
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_realtime_device_field_time ON realtime_points(device, field, time)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_monthly_billing_year_month ON monthly_billing_rates(year, month)"
     )
 
     conn.commit()
@@ -428,6 +444,173 @@ def build_gemp_email_content(
     return subject, body
 
 
+def month_label_from_number(month: int) -> str:
+    months = [
+        "",
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ]
+    if 1 <= month <= 12:
+        return months[month]
+    return f"Month {month}"
+
+
+def get_monthly_billing_rates(
+    db: sqlite3.Connection,
+    year: int,
+) -> List[Dict[str, Any]]:
+    rows = db.execute(
+        """
+        SELECT year, month, cost_per_kwh, updated_at
+        FROM monthly_billing_rates
+        WHERE year=?
+        ORDER BY month ASC
+        """,
+        (year,),
+    ).fetchall()
+
+    return [
+        {
+            "year": int(r["year"]),
+            "month": int(r["month"]),
+            "cost_per_kwh": float(r["cost_per_kwh"]),
+            "updated_at": r["updated_at"],
+        }
+        for r in rows
+    ]
+
+
+def save_monthly_billing_rate(
+    db: sqlite3.Connection,
+    year: int,
+    month: int,
+    cost_per_kwh: float,
+) -> Dict[str, Any]:
+    if year < 2000 or year > 3000:
+        raise HTTPException(status_code=400, detail="Invalid year")
+    if month < 1 or month > 12:
+        raise HTTPException(status_code=400, detail="Invalid month")
+    if cost_per_kwh < 0:
+        raise HTTPException(status_code=400, detail="cost_per_kwh must be >= 0")
+
+    updated_at = now_iso()
+
+    db.execute(
+        """
+        INSERT INTO monthly_billing_rates (year, month, cost_per_kwh, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(year, month)
+        DO UPDATE SET
+            cost_per_kwh=excluded.cost_per_kwh,
+            updated_at=excluded.updated_at
+        """,
+        (year, month, float(cost_per_kwh), updated_at),
+    )
+    db.commit()
+
+    row = db.execute(
+        """
+        SELECT year, month, cost_per_kwh, updated_at
+        FROM monthly_billing_rates
+        WHERE year=? AND month=?
+        """,
+        (year, month),
+    ).fetchone()
+
+    return {
+        "year": int(row["year"]),
+        "month": int(row["month"]),
+        "cost_per_kwh": float(row["cost_per_kwh"]),
+        "updated_at": row["updated_at"],
+    }
+
+
+def compute_monthly_billing_rows(
+    db: sqlite3.Connection,
+    year: int,
+    device: str,
+    field: str,
+) -> List[Dict[str, Any]]:
+    current_year = datetime.now().year
+
+    if year == current_year:
+        source_payload = build_gemp_report_payload(db, device=device, field=field)
+    else:
+        source_payload = get_gemp_report_config(db).get("payload", {}) or {}
+
+    rows = source_payload.get("rows", []) or []
+
+    saved_rates = {
+        int(r["month"]): r
+        for r in db.execute(
+            """
+            SELECT year, month, cost_per_kwh, updated_at
+            FROM monthly_billing_rates
+            WHERE year=?
+            """,
+            (year,),
+        ).fetchall()
+    }
+
+    month_name_to_number = {
+        "january": 1,
+        "february": 2,
+        "march": 3,
+        "april": 4,
+        "may": 5,
+        "june": 6,
+        "july": 7,
+        "august": 8,
+        "september": 9,
+        "october": 10,
+        "november": 11,
+        "december": 12,
+    }
+
+    output = []
+
+    for row in rows:
+        raw_month = str(row.get("month", "") or "").strip()
+        month_num = month_name_to_number.get(raw_month.lower())
+        if not month_num:
+            continue
+
+        raw_kwh = row.get("kwh", "")
+        try:
+            kwh = float(raw_kwh) if str(raw_kwh).strip() != "" else 0.0
+        except Exception:
+            kwh = 0.0
+
+        saved = saved_rates.get(month_num)
+        cost_per_kwh = float(saved["cost_per_kwh"]) if saved else None
+        bill_php = round(kwh * cost_per_kwh, 2) if cost_per_kwh is not None else None
+
+        output.append(
+            {
+                "year": year,
+                "month": month_num,
+                "month_label": raw_month or month_label_from_number(month_num),
+                "kwh": round(kwh, 2),
+                "cost_per_kwh": round(cost_per_kwh, 4) if cost_per_kwh is not None else None,
+                "bill_php": bill_php,
+                "updated_at": saved["updated_at"] if saved else None,
+            }
+        )
+
+    output.sort(key=lambda x: x["month"])
+    return output
+
+
 @app.on_event("startup")
 def startup():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=5.0)
@@ -618,6 +801,33 @@ class ReportScheduleOut(BaseModel):
 
 class SendTestReportIn(BaseModel):
     recipients: Optional[List[str]] = None
+
+
+class MonthlyBillingRateIn(BaseModel):
+    year: int
+    month: int
+    cost_per_kwh: float
+
+
+class MonthlyBillingRateOut(BaseModel):
+    year: int
+    month: int
+    cost_per_kwh: float
+    updated_at: str
+
+
+class MonthlyBillingRowOut(BaseModel):
+    year: int
+    month: int
+    month_label: str
+    kwh: float
+    cost_per_kwh: Optional[float] = None
+    bill_php: Optional[float] = None
+    updated_at: Optional[str] = None
+
+
+class PartialResetIn(BaseModel):
+    device: Optional[str] = None
 
 
 @app.get("/health")
@@ -1026,6 +1236,74 @@ def current_month_kwh_summary(
         "current_month_label": data["current_month_label"],
         "current_month_kwh": data["current_month_kwh"],
         "updated_at": data["updated_at"],
+    }
+
+
+@app.get("/billing/monthly-rates", response_model=List[MonthlyBillingRateOut])
+def read_monthly_billing_rates(
+    year: int,
+    db: sqlite3.Connection = Depends(get_db),
+):
+    return get_monthly_billing_rates(db, year)
+
+
+@app.put("/billing/monthly-rates", response_model=MonthlyBillingRateOut)
+def update_monthly_billing_rate(
+    payload: MonthlyBillingRateIn,
+    db: sqlite3.Connection = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    return save_monthly_billing_rate(
+        db,
+        year=payload.year,
+        month=payload.month,
+        cost_per_kwh=payload.cost_per_kwh,
+    )
+
+
+@app.get("/billing/monthly-summary", response_model=List[MonthlyBillingRowOut])
+def read_monthly_billing_summary(
+    year: int,
+    device: str = "pi4",
+    field: str = "power",
+    db: sqlite3.Connection = Depends(get_db),
+):
+    return compute_monthly_billing_rows(
+        db,
+        year=year,
+        device=device,
+        field=field,
+    )
+
+
+@app.post("/admin/reset/readings")
+def partial_reset_readings(
+    payload: Optional[PartialResetIn] = None,
+    db: sqlite3.Connection = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    device = payload.device.strip() if payload and payload.device else None
+
+    if device:
+        cur1 = db.execute("DELETE FROM realtime_points WHERE device=?", (device,))
+        deleted_realtime = cur1.rowcount
+
+        cur2 = db.execute("DELETE FROM notes WHERE device=?", (device,))
+        deleted_notes = cur2.rowcount
+    else:
+        cur1 = db.execute("DELETE FROM realtime_points")
+        deleted_realtime = cur1.rowcount
+
+        cur2 = db.execute("DELETE FROM notes")
+        deleted_notes = cur2.rowcount
+
+    db.commit()
+
+    return {
+        "ok": True,
+        "device": device,
+        "deleted_realtime_points": deleted_realtime,
+        "deleted_notes": deleted_notes,
     }
 
 
