@@ -14,12 +14,59 @@ from gemp_reporting import (
     has_report_run,
     log_report_run,
     build_gemp_report_payload,
+    compute_gemp_dynamic,
     REPORT_TZ,
 )
 
 CHECK_INTERVAL_SECONDS = int(os.getenv("REPORT_SCHEDULER_INTERVAL_S", "30"))
 REPORT_DEVICE = os.getenv("REPORT_DEVICE", "pi4").strip() or "pi4"
 REPORT_FIELD = os.getenv("REPORT_FIELD", "power").strip() or "power"
+
+
+def safe_str(value, fallback=""):
+    if value is None:
+        return fallback
+    value = str(value).strip()
+    return value if value else fallback
+
+
+def build_gemp_email_content(conn, payload, device=REPORT_DEVICE, field=REPORT_FIELD):
+    header = payload.get("header", {}) or {}
+
+    agency = safe_str(header.get("agency"), "Agency")
+    year = safe_str(header.get("year"), str(datetime.now().year))
+    prepared_by = safe_str(header.get("preparedBy"), "Your Full Name")
+    tel = safe_str(header.get("tel"), "")
+    smtp_from = safe_str(os.getenv("SMTP_FROM", ""), "")
+
+    dynamic = compute_gemp_dynamic(conn, device=device, field=field)
+    month_label = safe_str(dynamic.get("current_month_label"), datetime.now().strftime("%B"))
+
+    month_year_subject = f"{month_label} {year}".strip()
+    month_year_body = f"{month_label}, {year}".strip(", ")
+
+    contact_parts = [x for x in [tel, smtp_from] if x]
+    contact_line = " / ".join(contact_parts) if contact_parts else "Contact Number/Email Address"
+
+    subject = f"{agency} - MECR Submission - {month_year_subject}"
+
+    body = (
+        "Dear DOE-EUMB Secretariat,\n"
+        "Good day.\n\n"
+        "In compliance with the Government Energy Management Program (GEMP) under Republic Act No. 11285, "
+        f"we are officially submitting the following energy consumption report for the month of {month_year_body}:\n\n"
+        "Monthly Electricity Consumption Report (MECR) – Annex A\n\n"
+        "We hope you find everything in order. Should you have any questions or require further clarification, "
+        "please feel free to reach out.\n"
+        "Thank you.\n\n"
+        "Best regards,\n"
+        f"{prepared_by}\n"
+        "Designated Energy Efficiency and Conservation Officer (EECO)\n"
+        f"{agency}\n"
+        f"{contact_line}"
+    )
+
+    return subject, body
 
 
 def run_once():
@@ -53,13 +100,11 @@ def run_once():
         out_path = build_gemp_pdf(payload)
 
         try:
-            frequency = str(schedule.get("frequency") or "").lower()
-            subject = f"GEMP Report ({frequency.capitalize()}) - {schedule_key}"
-            body = (
-                "Attached is the scheduled GEMP report in PDF format.\n\n"
-                f"Schedule: {frequency}\n"
-                f"Schedule key: {schedule_key}\n"
-                f"Generated at: {now_local.isoformat()}\n"
+            subject, body = build_gemp_email_content(
+                conn,
+                payload,
+                device=REPORT_DEVICE,
+                field=REPORT_FIELD,
             )
 
             send_email_with_attachment(recipients, subject, body, out_path)
@@ -70,7 +115,7 @@ def run_once():
                 schedule_key=schedule_key,
                 scheduled_for=now_local.isoformat(),
                 status="sent",
-                message=f"Sent to {', '.join(recipients)}",
+                message=f"Sent to {', '.join(recipients)} | Subject: {subject}",
             )
             print(f"[OK] Sent scheduled GEMP PDF report: {schedule_key}")
         finally:
