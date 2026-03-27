@@ -357,6 +357,10 @@ def normalize_gemp_payload(raw: Dict[str, Any]) -> Dict[str, Any]:
             "address": header.get("address", "") or "",
             "fax": header.get("fax", "") or "",
             "region": header.get("region", "") or "",
+            "defaultBuildingDesc": header.get("defaultBuildingDesc", "") or "",
+            "defaultGrossArea": header.get("defaultGrossArea", "") or "",
+            "defaultAirconArea": header.get("defaultAirconArea", "") or "",
+            "defaultOccupants": header.get("defaultOccupants", "") or "",
             "preparedBy": header.get("preparedBy", "") or "",
             "preparedByDesignation": header.get("preparedByDesignation", "") or "",
             "notedBy": header.get("notedBy", "") or "",
@@ -532,6 +536,10 @@ class GempHeaderIn(BaseModel):
     address: Optional[str] = None
     fax: Optional[str] = None
     region: Optional[str] = None
+    defaultBuildingDesc: Optional[str] = None
+    defaultGrossArea: Optional[str] = None
+    defaultAirconArea: Optional[str] = None
+    defaultOccupants: Optional[str] = None
     preparedBy: Optional[str] = None
     preparedByDesignation: Optional[str] = None
     notedBy: Optional[str] = None
