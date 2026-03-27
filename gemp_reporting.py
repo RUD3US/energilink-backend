@@ -8,7 +8,8 @@ from zoneinfo import ZoneInfo
 
 DB_PATH = os.getenv("DB_PATH", "/home/ee/power-backend/app.db")
 REPORT_TZ = os.getenv("REPORT_TZ", "Asia/Manila")
-ARCHIVE_INTERVAL_HOURS = 0.5
+ARCHIVE_INTERVAL_HOURS = float(os.getenv("ARCHIVE_INTERVAL_HOURS", "0.25"))
+MAX_INTERVAL_GAP_HOURS = float(os.getenv("ARCHIVE_MAX_GAP_HOURS", "6"))
 
 MONTHS = [
     "January",
@@ -437,11 +438,42 @@ def load_recent_field_points(
     return points
 
 
-def compute_kwh_from_points(points: List[Tuple[datetime, float]]) -> float:
-    total = 0.0
-    for _, power_w in points:
-        total += power_w * ARCHIVE_INTERVAL_HOURS / 1000.0
-    return total
+def infer_archive_interval_hours(points: List[Tuple[datetime, float]]) -> float:
+    gaps: List[float] = []
+
+    for (current_dt, _), (next_dt, _) in zip(points, points[1:]):
+        gap_hours = (next_dt - current_dt).total_seconds() / 3600.0
+        if 0 < gap_hours <= MAX_INTERVAL_GAP_HOURS:
+            gaps.append(gap_hours)
+
+    if not gaps:
+        return ARCHIVE_INTERVAL_HOURS
+
+    gaps.sort()
+    mid = len(gaps) // 2
+    if len(gaps) % 2 == 1:
+        return gaps[mid]
+    return (gaps[mid - 1] + gaps[mid]) / 2.0
+
+
+def compute_kwh_from_points(points: List[Tuple[datetime, float]]) -> Tuple[float, float]:
+    total_kwh = 0.0
+    represented_hours = 0.0
+
+    for (current_dt, current_power_w), (next_dt, _) in zip(points, points[1:]):
+        gap_hours = (next_dt - current_dt).total_seconds() / 3600.0
+
+        if gap_hours <= 0:
+            continue
+        if gap_hours > MAX_INTERVAL_GAP_HOURS:
+            continue
+        if current_power_w < 0:
+            continue
+
+        total_kwh += current_power_w * gap_hours / 1000.0
+        represented_hours += gap_hours
+
+    return total_kwh, represented_hours
 
 
 def compute_gemp_dynamic(
@@ -457,26 +489,26 @@ def compute_gemp_dynamic(
     current_month_label = calendar.month_name[now_local.month]
 
     points = load_recent_field_points(conn, device, field, limit=10000)
+    inferred_interval_hours = infer_archive_interval_hours(points)
+
     last_30_points = [(dt, val) for dt, val in points if dt >= last_30_start]
     current_month_points = [(dt, val) for dt, val in points if dt >= month_start]
 
-    last_30_days_kwh = compute_kwh_from_points(last_30_points)
-    current_month_kwh = compute_kwh_from_points(current_month_points)
-    avg_daily_kwh_30d = last_30_days_kwh / 30.0 if last_30_days_kwh > 0 else 0.0
+    last_30_days_kwh, _last_30_hours = compute_kwh_from_points(last_30_points)
+    current_month_kwh, hours_elapsed_current_month = compute_kwh_from_points(current_month_points)
 
-    hours_elapsed_current_month = len(current_month_points) * ARCHIVE_INTERVAL_HOURS
+    avg_daily_kwh_30d = last_30_days_kwh / 30.0 if last_30_days_kwh > 0 else 0.0
     avg_kwh_per_hour_current_month = (
         current_month_kwh / hours_elapsed_current_month
         if hours_elapsed_current_month > 0
         else 0.0
     )
-
     projected_month_kwh = avg_daily_kwh_30d * current_month_days
 
     return {
         "device": device,
         "field": field,
-        "archive_interval_hours": ARCHIVE_INTERVAL_HOURS,
+        "archive_interval_hours": round(inferred_interval_hours, 6),
         "current_month_label": current_month_label,
         "current_month_days": current_month_days,
         "points_used_last_30_days": len(last_30_points),
