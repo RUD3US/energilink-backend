@@ -145,7 +145,10 @@ def ensure_table(conn: sqlite3.Connection):
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             year INTEGER NOT NULL,
             month INTEGER NOT NULL,
-            cost_per_kwh REAL NOT NULL,
+            cost_per_kwh REAL NOT NULL DEFAULT 0,
+            kwh REAL NOT NULL DEFAULT 0,
+            bill_php REAL NOT NULL DEFAULT 0,
+            is_finalized INTEGER NOT NULL DEFAULT 0,
             updated_at TEXT NOT NULL,
             UNIQUE(year, month)
         );
@@ -190,6 +193,31 @@ def add_missing_columns(conn: sqlite3.Connection):
         addcol("ALTER TABLE notes ADD COLUMN anchor_field TEXT")
     if "verified" not in cols:
         addcol("ALTER TABLE notes ADD COLUMN verified INTEGER DEFAULT 0")
+
+
+def add_missing_billing_columns(conn: sqlite3.Connection):
+    rows = conn.execute("PRAGMA table_info(monthly_billing_rates)").fetchall()
+    cols = set()
+
+    for r in rows:
+        try:
+            cols.add(r["name"])
+        except Exception:
+            cols.add(r[1])
+
+    def addcol(sql: str):
+        try:
+            conn.execute(sql)
+            conn.commit()
+        except Exception:
+            pass
+
+    if "kwh" not in cols:
+        addcol("ALTER TABLE monthly_billing_rates ADD COLUMN kwh REAL NOT NULL DEFAULT 0")
+    if "bill_php" not in cols:
+        addcol("ALTER TABLE monthly_billing_rates ADD COLUMN bill_php REAL NOT NULL DEFAULT 0")
+    if "is_finalized" not in cols:
+        addcol("ALTER TABLE monthly_billing_rates ADD COLUMN is_finalized INTEGER NOT NULL DEFAULT 0")
 
 
 def ensure_realtime_unique_index(conn: sqlite3.Connection):
@@ -465,15 +493,152 @@ def month_label_from_number(month: int) -> str:
     return f"Month {month}"
 
 
+def get_current_year_monthly_kwh_map(
+    db: sqlite3.Connection,
+    device: str,
+    field: str,
+) -> Dict[int, float]:
+    payload = build_gemp_report_payload(db, device=device, field=field)
+    rows = payload.get("rows", []) or []
+
+    month_name_to_number = {
+        "january": 1,
+        "february": 2,
+        "march": 3,
+        "april": 4,
+        "may": 5,
+        "june": 6,
+        "july": 7,
+        "august": 8,
+        "september": 9,
+        "october": 10,
+        "november": 11,
+        "december": 12,
+    }
+
+    output: Dict[int, float] = {}
+
+    for row in rows:
+        raw_month = str(row.get("month", "") or "").strip()
+        month_num = month_name_to_number.get(raw_month.lower())
+        if not month_num:
+            continue
+
+        raw_kwh = row.get("kwh", "")
+        try:
+            kwh = float(raw_kwh) if str(raw_kwh).strip() != "" else 0.0
+        except Exception:
+            kwh = 0.0
+
+        output[month_num] = round(kwh, 2)
+
+    return output
+
+
+def sync_current_year_billing_records(
+    db: sqlite3.Connection,
+    device: str,
+    field: str,
+):
+    now = datetime.now()
+    current_year = now.year
+    current_month = now.month
+
+    live_kwh_by_month = get_current_year_monthly_kwh_map(db, device=device, field=field)
+
+    existing_rows = db.execute(
+        """
+        SELECT year, month, cost_per_kwh, kwh, bill_php, is_finalized, updated_at
+        FROM monthly_billing_rates
+        WHERE year=?
+        """,
+        (current_year,),
+    ).fetchall()
+
+    existing_by_month = {int(r["month"]): r for r in existing_rows}
+
+    dirty = False
+
+    for month_num in range(1, current_month + 1):
+        live_kwh = round(live_kwh_by_month.get(month_num, 0.0), 2)
+        existing = existing_by_month.get(month_num)
+
+        if existing is None:
+            is_finalized = 0 if month_num == current_month else 1
+            db.execute(
+                """
+                INSERT INTO monthly_billing_rates (
+                    year, month, cost_per_kwh, kwh, bill_php, is_finalized, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    current_year,
+                    month_num,
+                    0.0,
+                    live_kwh,
+                    0.0,
+                    is_finalized,
+                    now_iso(),
+                ),
+            )
+            dirty = True
+            continue
+
+        stored_rate = float(existing["cost_per_kwh"] or 0.0)
+        stored_kwh = float(existing["kwh"] or 0.0)
+        stored_bill = float(existing["bill_php"] or 0.0)
+        stored_finalized = int(existing["is_finalized"] or 0)
+
+        if month_num == current_month:
+            new_kwh = live_kwh
+            new_finalized = 0
+        else:
+            new_kwh = stored_kwh if stored_kwh > 0 else live_kwh
+            new_finalized = 1
+
+        new_bill = round(new_kwh * stored_rate, 2)
+
+        if (
+            round(stored_kwh, 2) != round(new_kwh, 2)
+            or round(stored_bill, 2) != round(new_bill, 2)
+            or stored_finalized != new_finalized
+        ):
+            db.execute(
+                """
+                UPDATE monthly_billing_rates
+                SET kwh=?, bill_php=?, is_finalized=?, updated_at=?
+                WHERE year=? AND month=?
+                """,
+                (
+                    new_kwh,
+                    new_bill,
+                    new_finalized,
+                    now_iso(),
+                    current_year,
+                    month_num,
+                ),
+            )
+            dirty = True
+
+    if dirty:
+        db.commit()
+
+
 def get_monthly_billing_rates(
     db: sqlite3.Connection,
     year: int,
+    device: str = "pi4",
+    field: str = "power",
 ) -> List[Dict[str, Any]]:
+    if year == datetime.now().year:
+        sync_current_year_billing_records(db, device=device, field=field)
+
     rows = db.execute(
         """
         SELECT year, month, cost_per_kwh, updated_at
         FROM monthly_billing_rates
-        WHERE year=?
+        WHERE year=? AND cost_per_kwh > 0
         ORDER BY month ASC
         """,
         (year,),
@@ -495,6 +660,8 @@ def save_monthly_billing_rate(
     year: int,
     month: int,
     cost_per_kwh: float,
+    device: str = "pi4",
+    field: str = "power",
 ) -> Dict[str, Any]:
     if year < 2000 or year > 3000:
         raise HTTPException(status_code=400, detail="Invalid year")
@@ -503,22 +670,71 @@ def save_monthly_billing_rate(
     if cost_per_kwh < 0:
         raise HTTPException(status_code=400, detail="cost_per_kwh must be >= 0")
 
-    updated_at = now_iso()
+    now = datetime.now()
+    current_year = now.year
+    current_month = now.month
+
+    if year == current_year:
+        sync_current_year_billing_records(db, device=device, field=field)
+
+    row = db.execute(
+        """
+        SELECT year, month, cost_per_kwh, kwh, bill_php, is_finalized, updated_at
+        FROM monthly_billing_rates
+        WHERE year=? AND month=?
+        """,
+        (year, month),
+    ).fetchone()
+
+    kwh = 0.0
+    is_finalized = 1
+
+    if row is not None:
+        kwh = float(row["kwh"] or 0.0)
+        is_finalized = int(row["is_finalized"] or 0)
+    else:
+        if year == current_year:
+            live_map = get_current_year_monthly_kwh_map(db, device=device, field=field)
+            kwh = round(live_map.get(month, 0.0), 2)
+            is_finalized = 0 if month == current_month else 1
+        else:
+            kwh = 0.0
+            is_finalized = 1
+
+    if year == current_year and month == current_month:
+        live_map = get_current_year_monthly_kwh_map(db, device=device, field=field)
+        kwh = round(live_map.get(month, 0.0), 2)
+        is_finalized = 0
+
+    bill_php = round(kwh * float(cost_per_kwh), 2)
 
     db.execute(
         """
-        INSERT INTO monthly_billing_rates (year, month, cost_per_kwh, updated_at)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO monthly_billing_rates (
+            year, month, cost_per_kwh, kwh, bill_php, is_finalized, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(year, month)
         DO UPDATE SET
             cost_per_kwh=excluded.cost_per_kwh,
+            kwh=excluded.kwh,
+            bill_php=excluded.bill_php,
+            is_finalized=excluded.is_finalized,
             updated_at=excluded.updated_at
         """,
-        (year, month, float(cost_per_kwh), updated_at),
+        (
+            year,
+            month,
+            float(cost_per_kwh),
+            kwh,
+            bill_php,
+            is_finalized,
+            now_iso(),
+        ),
     )
     db.commit()
 
-    row = db.execute(
+    saved = db.execute(
         """
         SELECT year, month, cost_per_kwh, updated_at
         FROM monthly_billing_rates
@@ -528,10 +744,10 @@ def save_monthly_billing_rate(
     ).fetchone()
 
     return {
-        "year": int(row["year"]),
-        "month": int(row["month"]),
-        "cost_per_kwh": float(row["cost_per_kwh"]),
-        "updated_at": row["updated_at"],
+        "year": int(saved["year"]),
+        "month": int(saved["month"]),
+        "cost_per_kwh": float(saved["cost_per_kwh"]),
+        "updated_at": saved["updated_at"],
     }
 
 
@@ -541,73 +757,56 @@ def compute_monthly_billing_rows(
     device: str,
     field: str,
 ) -> List[Dict[str, Any]]:
-    current_year = datetime.now().year
+    if year == datetime.now().year:
+        sync_current_year_billing_records(db, device=device, field=field)
 
-    if year == current_year:
-        source_payload = build_gemp_report_payload(db, device=device, field=field)
-    else:
-        source_payload = get_gemp_report_config(db).get("payload", {}) or {}
+    rows = db.execute(
+        """
+        SELECT year, month, cost_per_kwh, kwh, bill_php, is_finalized, updated_at
+        FROM monthly_billing_rates
+        WHERE year=?
+        ORDER BY month ASC
+        """,
+        (year,),
+    ).fetchall()
 
-    rows = source_payload.get("rows", []) or []
-
-    saved_rates = {
-        int(r["month"]): r
-        for r in db.execute(
-            """
-            SELECT year, month, cost_per_kwh, updated_at
-            FROM monthly_billing_rates
-            WHERE year=?
-            """,
-            (year,),
-        ).fetchall()
-    }
-
-    month_name_to_number = {
-        "january": 1,
-        "february": 2,
-        "march": 3,
-        "april": 4,
-        "may": 5,
-        "june": 6,
-        "july": 7,
-        "august": 8,
-        "september": 9,
-        "october": 10,
-        "november": 11,
-        "december": 12,
-    }
+    rows_by_month = {int(r["month"]): r for r in rows}
 
     output = []
 
-    for row in rows:
-        raw_month = str(row.get("month", "") or "").strip()
-        month_num = month_name_to_number.get(raw_month.lower())
-        if not month_num:
+    for month_num in range(1, 13):
+        row = rows_by_month.get(month_num)
+
+        if row is None:
+            output.append(
+                {
+                    "year": year,
+                    "month": month_num,
+                    "month_label": month_label_from_number(month_num),
+                    "kwh": 0.0,
+                    "cost_per_kwh": None,
+                    "bill_php": None,
+                    "updated_at": None,
+                }
+            )
             continue
 
-        raw_kwh = row.get("kwh", "")
-        try:
-            kwh = float(raw_kwh) if str(raw_kwh).strip() != "" else 0.0
-        except Exception:
-            kwh = 0.0
-
-        saved = saved_rates.get(month_num)
-        cost_per_kwh = float(saved["cost_per_kwh"]) if saved else None
-        bill_php = round(kwh * cost_per_kwh, 2) if cost_per_kwh is not None else None
+        stored_rate = float(row["cost_per_kwh"] or 0.0)
+        stored_kwh = float(row["kwh"] or 0.0)
+        stored_bill = float(row["bill_php"] or 0.0)
 
         output.append(
             {
                 "year": year,
                 "month": month_num,
-                "month_label": raw_month or month_label_from_number(month_num),
-                "kwh": round(kwh, 2),
-                "cost_per_kwh": round(cost_per_kwh, 4) if cost_per_kwh is not None else None,
-                "bill_php": bill_php,
-                "updated_at": saved["updated_at"] if saved else None,
+                "month_label": month_label_from_number(month_num),
+                "kwh": round(stored_kwh, 2),
+                "cost_per_kwh": round(stored_rate, 4) if stored_rate > 0 else None,
+                "bill_php": round(stored_bill, 2) if stored_rate > 0 else None,
+                "updated_at": row["updated_at"],
             }
         )
 
-    output.sort(key=lambda x: x["month"])
     return output
 
 
@@ -618,6 +817,7 @@ def startup():
         configure_sqlite(conn)
         ensure_table(conn)
         add_missing_columns(conn)
+        add_missing_billing_columns(conn)
         ensure_report_tables(conn)
         ensure_realtime_unique_index(conn)
         conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
@@ -1242,14 +1442,18 @@ def current_month_kwh_summary(
 @app.get("/billing/monthly-rates", response_model=List[MonthlyBillingRateOut])
 def read_monthly_billing_rates(
     year: int,
+    device: str = "pi4",
+    field: str = "power",
     db: sqlite3.Connection = Depends(get_db),
 ):
-    return get_monthly_billing_rates(db, year)
+    return get_monthly_billing_rates(db, year, device=device, field=field)
 
 
 @app.put("/billing/monthly-rates", response_model=MonthlyBillingRateOut)
 def update_monthly_billing_rate(
     payload: MonthlyBillingRateIn,
+    device: str = "pi4",
+    field: str = "power",
     db: sqlite3.Connection = Depends(get_db),
     user=Depends(get_current_user),
 ):
@@ -1258,6 +1462,8 @@ def update_monthly_billing_rate(
         year=payload.year,
         month=payload.month,
         cost_per_kwh=payload.cost_per_kwh,
+        device=device,
+        field=field,
     )
 
 
