@@ -1197,6 +1197,7 @@ def public_history(
                 MAX(CASE WHEN field='power_factor' THEN value END) AS power_factor
             FROM realtime_points
             WHERE device=?
+              AND field IN ('rms_voltage', 'rms_current', 'power', 'power_factor')
             GROUP BY device, time
         ),
         note_base AS (
@@ -1219,6 +1220,10 @@ def public_history(
         LEFT JOIN note_base n
             ON h.device = n.device
            AND h.time = n.note_time
+        WHERE h.rms_voltage IS NOT NULL
+          AND h.rms_current IS NOT NULL
+          AND h.power IS NOT NULL
+          AND h.power_factor IS NOT NULL
         ORDER BY h.time DESC
         LIMIT ?
         """,
