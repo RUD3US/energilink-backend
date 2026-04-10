@@ -408,29 +408,43 @@ def compute_stats_from_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def load_recent_field_points(
+def load_recent_history_points(
     conn: sqlite3.Connection,
     device: str,
-    field: str,
     limit: int = 10000,
-) -> List[Tuple[datetime, float]]:
+) -> List[Tuple[datetime, float, float, float]]:
     rows = conn.execute(
         """
-        SELECT time, value
-        FROM realtime_points
-        WHERE device=? AND field=?
-        ORDER BY id DESC
+        WITH history_base AS (
+            SELECT
+                time,
+                MAX(CASE WHEN field='rms_voltage' THEN value END) AS rms_voltage,
+                MAX(CASE WHEN field='rms_current' THEN value END) AS rms_current,
+                MAX(CASE WHEN field='power' THEN value END) AS power
+            FROM realtime_points
+            WHERE device=?
+              AND field IN ('rms_voltage', 'rms_current', 'power')
+            GROUP BY time
+        )
+        SELECT time, rms_voltage, rms_current, power
+        FROM history_base
+        WHERE rms_voltage IS NOT NULL
+          AND rms_current IS NOT NULL
+          AND power IS NOT NULL
+        ORDER BY time DESC
         LIMIT ?
         """,
-        (device, field, limit),
+        (device, limit),
     ).fetchall()
 
-    points: List[Tuple[datetime, float]] = []
+    points: List[Tuple[datetime, float, float, float]] = []
     for r in rows:
         try:
             dt = parse_iso_to_dt(r["time"])
-            value = float(r["value"])
-            points.append((dt, value))
+            voltage = float(r["rms_voltage"])
+            current = float(r["rms_current"])
+            power = float(r["power"])
+            points.append((dt, voltage, current, power))
         except Exception:
             continue
 
@@ -438,10 +452,10 @@ def load_recent_field_points(
     return points
 
 
-def infer_archive_interval_hours(points: List[Tuple[datetime, float]]) -> float:
+def infer_archive_interval_hours(points: List[Tuple[datetime, float, float, float]]) -> float:
     gaps: List[float] = []
 
-    for (current_dt, _), (next_dt, _) in zip(points, points[1:]):
+    for (current_dt, _, _, _), (next_dt, _, _, _) in zip(points, points[1:]):
         gap_hours = (next_dt - current_dt).total_seconds() / 3600.0
         if 0 < gap_hours <= MAX_INTERVAL_GAP_HOURS:
             gaps.append(gap_hours)
@@ -456,21 +470,25 @@ def infer_archive_interval_hours(points: List[Tuple[datetime, float]]) -> float:
     return (gaps[mid - 1] + gaps[mid]) / 2.0
 
 
-def compute_kwh_from_points(points: List[Tuple[datetime, float]]) -> Tuple[float, float]:
+def compute_kwh_from_points(points: List[Tuple[datetime, float, float, float]]) -> Tuple[float, float]:
     total_kwh = 0.0
     represented_hours = 0.0
 
-    for (current_dt, current_power_w), (next_dt, _) in zip(points, points[1:]):
+    for (current_dt, voltage, current, power_w), (next_dt, _, _, _) in zip(points, points[1:]):
         gap_hours = (next_dt - current_dt).total_seconds() / 3600.0
 
         if gap_hours <= 0:
             continue
         if gap_hours > MAX_INTERVAL_GAP_HOURS:
             continue
-        if current_power_w < 0:
+        if power_w < 0:
             continue
 
-        total_kwh += current_power_w * gap_hours / 1000.0
+        # Main fix: ignore invalid rows where both V and A are zero
+        if voltage == 0 and current == 0:
+            continue
+
+        total_kwh += power_w * gap_hours / 1000.0
         represented_hours += gap_hours
 
     return total_kwh, represented_hours
@@ -488,11 +506,12 @@ def compute_gemp_dynamic(
     current_month_days = calendar.monthrange(now_local.year, now_local.month)[1]
     current_month_label = calendar.month_name[now_local.month]
 
-    points = load_recent_field_points(conn, device, field, limit=10000)
+    # Use full history-style rows, not raw power-only rows
+    points = load_recent_history_points(conn, device=device, limit=10000)
     inferred_interval_hours = infer_archive_interval_hours(points)
 
-    last_30_points = [(dt, val) for dt, val in points if dt >= last_30_start]
-    current_month_points = [(dt, val) for dt, val in points if dt >= month_start]
+    last_30_points = [row for row in points if row[0] >= last_30_start]
+    current_month_points = [row for row in points if row[0] >= month_start]
 
     last_30_days_kwh, _last_30_hours = compute_kwh_from_points(last_30_points)
     current_month_kwh, hours_elapsed_current_month = compute_kwh_from_points(current_month_points)
