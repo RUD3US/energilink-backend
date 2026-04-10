@@ -809,7 +809,30 @@ def compute_monthly_billing_rows(
 
     return output
 
+def validate_metrics_payload(payload: "MetricsIn") -> None:
+    if payload.rms_voltage < 0:
+        raise HTTPException(status_code=400, detail="rms_voltage must be >= 0")
 
+    if payload.rms_current < 0:
+        raise HTTPException(status_code=400, detail="rms_current must be >= 0")
+
+    if payload.power is not None and payload.power < 0:
+        raise HTTPException(status_code=400, detail="power must be >= 0")
+
+    if payload.apparent_power is not None and payload.apparent_power < 0:
+        raise HTTPException(status_code=400, detail="apparent_power must be >= 0")
+
+    if payload.power_factor is not None:
+        if payload.power_factor < 0 or payload.power_factor > 1:
+            raise HTTPException(status_code=400, detail="power_factor must be between 0 and 1")
+
+    # Main fix: reject invalid zero-voltage and zero-current record
+    if payload.rms_voltage == 0 and payload.rms_current == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Rejected invalid reading: voltage and current are both zero",
+        )
+        
 @app.on_event("startup")
 def startup():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=5.0)
@@ -1062,6 +1085,7 @@ def email_debug_config():
 
 @app.post("/ingest/metrics")
 def ingest_metrics(payload: MetricsIn, db: sqlite3.Connection = Depends(get_db)):
+    validate_metrics_payload(payload)
     t = payload.time.strip() if payload.time else now_iso()
 
     rows = [
@@ -1224,6 +1248,7 @@ def public_history(
           AND h.rms_current IS NOT NULL
           AND h.power IS NOT NULL
           AND h.power_factor IS NOT NULL
+          AND NOT (h.rms_voltage = 0 AND h.rms_current = 0)
         ORDER BY h.time DESC
         LIMIT ?
         """,
