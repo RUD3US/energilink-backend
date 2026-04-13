@@ -1213,7 +1213,7 @@ def public_history(
     limit: int = 200,
     db: sqlite3.Connection = Depends(get_db),
 ):
-    limit = max(1, min(limit, 1000))
+    limit = max(1, min(limit, 5000))
 
     rows = db.execute(
         """
