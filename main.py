@@ -826,19 +826,39 @@ def validate_metrics_payload(payload: "MetricsIn") -> None:
         if payload.power_factor < 0 or payload.power_factor > 1:
             raise HTTPException(status_code=400, detail="power_factor must be between 0 and 1")
 
-    if payload.power_factor is not None and payload.power is not None:
-        if payload.power_factor <= 0.001 and payload.power > 0:
-            raise HTTPException(
-                status_code=400,
-                detail="Rejected invalid reading: near-zero power factor while power is positive",
-            )
-
+    # Reject dead-zero reading
     if payload.rms_voltage == 0 and payload.rms_current == 0:
         raise HTTPException(
             status_code=400,
             detail="Rejected invalid reading: voltage and current are both zero",
         )
-        
+
+    # Reject impossible PF vs real power
+    if payload.power_factor is not None and payload.power is not None:
+        if payload.power_factor <= 0.001 and payload.power > 50:
+            raise HTTPException(
+                status_code=400,
+                detail="Rejected invalid reading: near-zero power factor while power is positive",
+            )
+
+    # Cross-check P against V * I * PF when all are present
+    if (
+        payload.power is not None
+        and payload.power_factor is not None
+        and payload.rms_voltage > 0
+        and payload.rms_current > 0
+    ):
+        apparent = payload.rms_voltage * payload.rms_current
+        expected_power = apparent * payload.power_factor
+
+        # Allow tolerance because field measurements are noisy
+        tolerance = max(100.0, apparent * 0.20)
+
+        if abs(payload.power - expected_power) > tolerance:
+            raise HTTPException(
+                status_code=400,
+                detail="Rejected invalid reading: power is inconsistent with voltage, current, and power factor",
+            )
 @app.on_event("startup")
 def startup():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=5.0)
