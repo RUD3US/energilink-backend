@@ -826,7 +826,13 @@ def validate_metrics_payload(payload: "MetricsIn") -> None:
         if payload.power_factor < 0 or payload.power_factor > 1:
             raise HTTPException(status_code=400, detail="power_factor must be between 0 and 1")
 
-    # Main fix: reject invalid zero-voltage and zero-current record
+    if payload.power_factor is not None and payload.power is not None:
+        if payload.power_factor <= 0.001 and payload.power > 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Rejected invalid reading: near-zero power factor while power is positive",
+            )
+
     if payload.rms_voltage == 0 and payload.rms_current == 0:
         raise HTTPException(
             status_code=400,
