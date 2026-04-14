@@ -37,6 +37,11 @@ NOTE_METRIC_CANONICAL = "real_power"
 NOTE_METRIC_LEGACY = "power"
 ALLOWED_NOTE_METRICS = {NOTE_METRIC_CANONICAL, NOTE_METRIC_LEGACY}
 ALLOWED_NOTE_FIELDS = {"power", "power_realtime"}
+MAX_REASONABLE_CURRENT_A = float(os.getenv("MAX_REASONABLE_CURRENT_A", "25"))
+MAX_REASONABLE_VOLTAGE_V = float(os.getenv("MAX_REASONABLE_VOLTAGE_V", "300"))
+MAX_REASONABLE_POWER_W = float(os.getenv("MAX_REASONABLE_POWER_W", "10000"))
+MAX_REASONABLE_POWER_FACTOR = float(os.getenv("MAX_REASONABLE_POWER_FACTOR", "1"))
+MIN_REASONABLE_POWER_FACTOR = float(os.getenv("MIN_REASONABLE_POWER_FACTOR", "0"))
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -816,24 +821,46 @@ def validate_metrics_payload(payload: "MetricsIn") -> None:
     if payload.rms_current < 0:
         raise HTTPException(status_code=400, detail="rms_current must be >= 0")
 
-    if payload.power is not None and payload.power < 0:
-        raise HTTPException(status_code=400, detail="power must be >= 0")
+    if payload.rms_current > MAX_REASONABLE_CURRENT_A:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Rejected invalid reading: current exceeds {MAX_REASONABLE_CURRENT_A} A",
+        )
+
+    if payload.rms_voltage > MAX_REASONABLE_VOLTAGE_V:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Rejected invalid reading: voltage exceeds {MAX_REASONABLE_VOLTAGE_V} V",
+        )
+
+    if payload.power is not None:
+        if payload.power < 0:
+            raise HTTPException(status_code=400, detail="power must be >= 0")
+        if payload.power > MAX_REASONABLE_POWER_W:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Rejected invalid reading: power exceeds {MAX_REASONABLE_POWER_W} W",
+            )
 
     if payload.apparent_power is not None and payload.apparent_power < 0:
         raise HTTPException(status_code=400, detail="apparent_power must be >= 0")
 
     if payload.power_factor is not None:
-        if payload.power_factor < 0 or payload.power_factor > 1:
-            raise HTTPException(status_code=400, detail="power_factor must be between 0 and 1")
+        if (
+            payload.power_factor < MIN_REASONABLE_POWER_FACTOR
+            or payload.power_factor > MAX_REASONABLE_POWER_FACTOR
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="power_factor must be between 0 and 1",
+            )
 
-    # Reject dead-zero reading
     if payload.rms_voltage == 0 and payload.rms_current == 0:
         raise HTTPException(
             status_code=400,
             detail="Rejected invalid reading: voltage and current are both zero",
         )
 
-    # Reject impossible PF vs real power
     if payload.power_factor is not None and payload.power is not None:
         if payload.power_factor <= 0.001 and payload.power > 50:
             raise HTTPException(
@@ -841,20 +868,18 @@ def validate_metrics_payload(payload: "MetricsIn") -> None:
                 detail="Rejected invalid reading: near-zero power factor while power is positive",
             )
 
-    # Cross-check P against V * I * PF when all are present
     if (
         payload.power is not None
         and payload.power_factor is not None
         and payload.rms_voltage > 0
         and payload.rms_current > 0
     ):
-        apparent = payload.rms_voltage * payload.rms_current
-        expected_power = apparent * payload.power_factor
+        apparent_power_est = payload.rms_voltage * payload.rms_current
+        expected_real_power = apparent_power_est * payload.power_factor
 
-        # Allow tolerance because field measurements are noisy
-        tolerance = max(100.0, apparent * 0.20)
+        tolerance = max(150.0, apparent_power_est * 0.25)
 
-        if abs(payload.power - expected_power) > tolerance:
+        if abs(payload.power - expected_real_power) > tolerance:
             raise HTTPException(
                 status_code=400,
                 detail="Rejected invalid reading: power is inconsistent with voltage, current, and power factor",
@@ -1270,15 +1295,15 @@ def public_history(
         LEFT JOIN note_base n
             ON h.device = n.device
            AND h.time = n.note_time
-        WHERE h.rms_voltage IS NOT NULL
-          AND h.rms_current IS NOT NULL
-          AND h.power IS NOT NULL
-          AND h.power_factor IS NOT NULL
-          AND NOT (h.rms_voltage = 0 AND h.rms_current = 0)
-        ORDER BY h.time DESC
+       WHERE h.rms_voltage IS NOT NULL
+         AND h.rms_current IS NOT NULL
+         AND h.power IS NOT NULL
+         AND h.power_factor IS NOT NULL
+         AND h.rms_current <= ?
+       ORDER BY h.time DESC
         LIMIT ?
         """,
-        (device, device, limit),
+        (device, device, MAX_REASONABLE_CURRENT_A, limit),
     ).fetchall()
 
     return [
