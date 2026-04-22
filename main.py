@@ -1295,10 +1295,12 @@ def public_history(
         LEFT JOIN note_base n
             ON h.device = n.device
            AND h.time = n.note_time
-       WHERE h.rms_voltage IS NOT NULL
+        WHERE h.rms_voltage IS NOT NULL
          AND h.rms_current IS NOT NULL
          AND h.power IS NOT NULL
          AND h.power_factor IS NOT NULL
+         AND NOT (h.rms_voltage = 0 AND h.rms_current = 0)
+         AND NOT (h.power_factor <= 0.001 AND h.power > 50)
          AND h.rms_current <= ?
        ORDER BY h.time DESC
         LIMIT ?
