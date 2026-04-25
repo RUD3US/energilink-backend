@@ -938,6 +938,7 @@ class HistoryRowOut(BaseModel):
     rms_current: Optional[float] = None
     power: Optional[float] = None
     power_factor: Optional[float] = None
+    note_id: Optional[int] = None
     note: Optional[str] = None
 
 
@@ -959,6 +960,143 @@ class NoteUpdateIn(BaseModel):
     anchor_time: Optional[str] = None
     anchor_value: Optional[float] = None
     anchor_field: Optional[str] = None
+
+@app.put("/history/note")
+def save_history_note(
+    payload: HistoryNoteIn,
+    db: sqlite3.Connection = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    device = cleaned_str(payload.device) or "pi4"
+    anchor_time = cleaned_str(payload.time)
+
+    if not anchor_time:
+        raise HTTPException(status_code=400, detail="History row time is required")
+
+    metric, anchor_field = normalize_note_target(
+        NOTE_METRIC_CANONICAL,
+        payload.anchor_field,
+    )
+
+    text = cleaned_str(payload.text)
+
+    existing = db.execute(
+        """
+        SELECT *
+        FROM notes
+        WHERE device=?
+          AND COALESCE(anchor_time, time)=?
+          AND metric IN (?, ?)
+        ORDER BY id ASC
+        LIMIT 1
+        """,
+        (
+            device,
+            anchor_time,
+            NOTE_METRIC_CANONICAL,
+            NOTE_METRIC_LEGACY,
+        ),
+    ).fetchone()
+
+    # If note is cleared, delete the existing note for that row.
+    if not text:
+        if existing:
+            db.execute("DELETE FROM notes WHERE id=?", (existing["id"],))
+            db.commit()
+
+        return {
+            "ok": True,
+            "deleted": True,
+            "note_id": None,
+            "note": None,
+        }
+
+    updated = now_iso()
+
+    anchor_value, verified = find_nearest_realtime(
+        db,
+        device,
+        anchor_field,
+        anchor_time,
+    )
+
+    if existing:
+        db.execute(
+            """
+            UPDATE notes
+            SET
+                text=?,
+                time=?,
+                updated_at=?,
+                anchor_time=?,
+                anchor_value=?,
+                anchor_field=?,
+                verified=?
+            WHERE id=?
+            """,
+            (
+                text,
+                anchor_time,
+                updated,
+                anchor_time,
+                anchor_value,
+                anchor_field,
+                int(verified),
+                existing["id"],
+            ),
+        )
+        db.commit()
+
+        row = db.execute("SELECT * FROM notes WHERE id=?", (existing["id"],)).fetchone()
+
+        return {
+            "ok": True,
+            "deleted": False,
+            "note_id": int(row["id"]),
+            "note": row["text"],
+        }
+
+    cur = db.execute(
+        """
+        INSERT INTO notes (
+            device,
+            metric,
+            time,
+            text,
+            author_id,
+            created_at,
+            updated_at,
+            anchor_time,
+            anchor_value,
+            anchor_field,
+            verified
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            device,
+            metric,
+            anchor_time,
+            text,
+            int(user["id"]),
+            updated,
+            updated,
+            anchor_time,
+            anchor_value,
+            anchor_field,
+            int(verified),
+        ),
+    )
+    db.commit()
+
+    row = db.execute("SELECT * FROM notes WHERE id=?", (cur.lastrowid,)).fetchone()
+
+    return {
+        "ok": True,
+        "deleted": False,
+        "note_id": int(row["id"]),
+        "note": row["text"],
+    }
 
 
 class NoteOut(BaseModel):
@@ -1279,9 +1417,11 @@ def public_history(
             SELECT
                 device,
                 COALESCE(anchor_time, time) AS note_time,
+                MIN(id) AS note_id,
                 GROUP_CONCAT(text, ' | ') AS note
             FROM notes
             WHERE device=?
+              AND metric IN (?, ?)
             GROUP BY device, COALESCE(anchor_time, time)
         )
         SELECT
@@ -1290,6 +1430,7 @@ def public_history(
             h.rms_current,
             h.power,
             h.power_factor,
+            n.note_id,
             n.note
         FROM history_base h
         LEFT JOIN note_base n
@@ -1302,10 +1443,17 @@ def public_history(
          AND NOT (h.rms_voltage = 0 AND h.rms_current = 0)
          AND NOT (h.power_factor <= 0.001 AND h.power > 50)
          AND h.rms_current <= ?
-       ORDER BY h.time DESC
+        ORDER BY h.time DESC
         LIMIT ?
         """,
-        (device, device, MAX_REASONABLE_CURRENT_A, limit),
+        (
+            device,
+            device,
+            NOTE_METRIC_CANONICAL,
+            NOTE_METRIC_LEGACY,
+            MAX_REASONABLE_CURRENT_A,
+            limit,
+        ),
     ).fetchall()
 
     return [
@@ -1315,12 +1463,149 @@ def public_history(
             "rms_current": float(r["rms_current"]) if r["rms_current"] is not None else None,
             "power": float(r["power"]) if r["power"] is not None else None,
             "power_factor": float(r["power_factor"]) if r["power_factor"] is not None else None,
+            "note_id": int(r["note_id"]) if r["note_id"] is not None else None,
             "note": r["note"],
         }
         for r in rows
     ]
 
+@app.put("/history/note")
+def save_history_note(
+    payload: HistoryNoteIn,
+    db: sqlite3.Connection = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    device = cleaned_str(payload.device) or "pi4"
+    anchor_time = cleaned_str(payload.time)
 
+    if not anchor_time:
+        raise HTTPException(status_code=400, detail="History row time is required")
+
+    metric, anchor_field = normalize_note_target(
+        NOTE_METRIC_CANONICAL,
+        payload.anchor_field,
+    )
+
+    text = cleaned_str(payload.text)
+
+    existing = db.execute(
+        """
+        SELECT *
+        FROM notes
+        WHERE device=?
+          AND COALESCE(anchor_time, time)=?
+          AND metric IN (?, ?)
+        ORDER BY id ASC
+        LIMIT 1
+        """,
+        (
+            device,
+            anchor_time,
+            NOTE_METRIC_CANONICAL,
+            NOTE_METRIC_LEGACY,
+        ),
+    ).fetchone()
+
+    # If note is cleared, delete the existing note for that row.
+    if not text:
+        if existing:
+            db.execute("DELETE FROM notes WHERE id=?", (existing["id"],))
+            db.commit()
+
+        return {
+            "ok": True,
+            "deleted": True,
+            "note_id": None,
+            "note": None,
+        }
+
+    updated = now_iso()
+
+    anchor_value, verified = find_nearest_realtime(
+        db,
+        device,
+        anchor_field,
+        anchor_time,
+    )
+
+    if existing:
+        db.execute(
+            """
+            UPDATE notes
+            SET
+                text=?,
+                time=?,
+                updated_at=?,
+                anchor_time=?,
+                anchor_value=?,
+                anchor_field=?,
+                verified=?
+            WHERE id=?
+            """,
+            (
+                text,
+                anchor_time,
+                updated,
+                anchor_time,
+                anchor_value,
+                anchor_field,
+                int(verified),
+                existing["id"],
+            ),
+        )
+        db.commit()
+
+        row = db.execute("SELECT * FROM notes WHERE id=?", (existing["id"],)).fetchone()
+
+        return {
+            "ok": True,
+            "deleted": False,
+            "note_id": int(row["id"]),
+            "note": row["text"],
+        }
+
+    cur = db.execute(
+        """
+        INSERT INTO notes (
+            device,
+            metric,
+            time,
+            text,
+            author_id,
+            created_at,
+            updated_at,
+            anchor_time,
+            anchor_value,
+            anchor_field,
+            verified
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            device,
+            metric,
+            anchor_time,
+            text,
+            int(user["id"]),
+            updated,
+            updated,
+            anchor_time,
+            anchor_value,
+            anchor_field,
+            int(verified),
+        ),
+    )
+    db.commit()
+
+    row = db.execute("SELECT * FROM notes WHERE id=?", (cur.lastrowid,)).fetchone()
+
+    return {
+        "ok": True,
+        "deleted": False,
+        "note_id": int(row["id"]),
+        "note": row["text"],
+    }
+    
 @app.get("/public/notes", response_model=List[NoteOut])
 def public_notes(
     device: str = "pi4",
