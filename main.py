@@ -905,7 +905,12 @@ class SendPlainEmailIn(BaseModel):
     subject: str = "EnergiLink SMTP test"
     body: str = "If you received this email, SMTP sending is working."
 
-
+class HistoryNoteIn(BaseModel):
+    device: str = "pi4"
+    time: str
+    text: Optional[str] = None
+    anchor_field: str = "power"
+    
 class AuthIn(BaseModel):
     email: str
     password: str
