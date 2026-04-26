@@ -2,7 +2,7 @@ import os
 import sqlite3
 from datetime import datetime, timezone
 from dateutil import parser as dtparser
-from openpyxl import load_workbook
+import xlrd
 
 try:
     from zoneinfo import ZoneInfo
@@ -11,7 +11,7 @@ except Exception:
 
 
 DB_PATH = os.getenv("DB_PATH", "/var/data/app.db")
-EXCEL_PATH = "history.xlsx"
+EXCEL_PATH = "history.xls"
 DEVICE = os.getenv("IMPORT_DEVICE", "pi4")
 LOCAL_TZ_NAME = os.getenv("IMPORT_TZ", "Asia/Manila")
 
@@ -183,20 +183,31 @@ def build_db_time_lookup(conn, device):
     return lookup
 
 
-def read_excel_rows(path):
-    workbook = load_workbook(path, data_only=True)
-    sheet = workbook.active
+def read_xls_rows(path):
+    workbook = xlrd.open_workbook(path)
+    sheet = workbook.sheet_by_index(0)
 
-    header_values = next(sheet.iter_rows(min_row=1, max_row=1, values_only=True))
-    headers = [clean_header(header) for header in header_values]
+    headers = []
+
+    for col_index in range(sheet.ncols):
+        headers.append(clean_header(sheet.cell_value(0, col_index)))
 
     rows = []
 
-    for values in sheet.iter_rows(min_row=2, values_only=True):
+    for row_index in range(1, sheet.nrows):
         row = {}
 
-        for index, header in enumerate(headers):
-            row[header] = values[index] if index < len(values) else None
+        for col_index, header in enumerate(headers):
+            cell = sheet.cell(row_index, col_index)
+            value = cell.value
+
+            if cell.ctype == xlrd.XL_CELL_DATE:
+                try:
+                    value = xlrd.xldate_as_datetime(value, workbook.datemode)
+                except Exception:
+                    pass
+
+            row[header] = value
 
         rows.append(row)
 
@@ -385,7 +396,7 @@ def run_import(dry_run=False, clear_blank_notes=False):
     if not os.path.exists(DB_PATH):
         raise SystemExit(f"Database not found: {DB_PATH}")
 
-    rows = read_excel_rows(EXCEL_PATH)
+    rows = read_xls_rows(EXCEL_PATH)
 
     conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=5.0)
     configure_sqlite(conn)
