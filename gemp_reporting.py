@@ -474,22 +474,16 @@ def compute_kwh_from_points(points: List[Tuple[datetime, float, float, float]]) 
     total_kwh = 0.0
     represented_hours = 0.0
 
-    for (current_dt, voltage, current, power_w), (next_dt, _, _, _) in zip(points, points[1:]):
-        gap_hours = (next_dt - current_dt).total_seconds() / 3600.0
-
-        if gap_hours <= 0:
-            continue
-        if gap_hours > MAX_INTERVAL_GAP_HOURS:
-            continue
+    for current_dt, voltage, current, power_w in points:
         if power_w < 0:
             continue
 
-        # Main fix: ignore invalid rows where both V and A are zero
+        # Ignore invalid rows where both V and A are zero
         if voltage == 0 and current == 0:
             continue
 
-        total_kwh += power_w * gap_hours / 1000.0
-        represented_hours += gap_hours
+        total_kwh += power_w * ARCHIVE_INTERVAL_HOURS / 1000.0
+        represented_hours += ARCHIVE_INTERVAL_HOURS
 
     return total_kwh, represented_hours
 
