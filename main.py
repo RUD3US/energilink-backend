@@ -1369,7 +1369,7 @@ def public_realtime(
     limit: int = 300,
     db: sqlite3.Connection = Depends(get_db),
 ):
-    limit = max(1, min(limit, 5000))
+    limit = max(1, min(limit, 50000))
 
     actual_field = field
     scale = 1.0
@@ -1401,7 +1401,7 @@ def public_history(
     limit: int = 200,
     db: sqlite3.Connection = Depends(get_db),
 ):
-    limit = max(1, min(limit, 5000))
+    limit = max(1, min(limit, 50000))
 
     rows = db.execute(
         """
