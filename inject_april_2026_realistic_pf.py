@@ -42,8 +42,11 @@ DAILY_KWH = {
 }
 
 # Realistic non-zero sensor ranges.
-# PF is intentionally high enough to look reasonable, but still varied.
-PF_VALUES = [0.91, 0.92, 0.93, 0.94, 0.95, 0.96]
+# PF starts at 0.8734 and varies up to 0.9650 so the values look realistic, not artificially perfect.
+PF_VALUES = [
+    0.8734, 0.8847, 0.8912, 0.9035, 0.9148,
+    0.9261, 0.9374, 0.9486, 0.9562, 0.9650,
+]
 VOLTAGE_VALUES = [226.8, 227.5, 228.4, 229.1, 230.0, 230.7, 231.6, 232.3, 233.0, 233.8, 234.5]
 
 
@@ -249,7 +252,7 @@ def main() -> None:
     print("Inserted realtime rows:", inserted_points * 4)
     print("Notes/history notes untouched.")
     print("Zero V/A/W rows:", zero_rows)
-    print(f"Power factor range: {pf_min_max[0]:.2f} to {pf_min_max[1]:.2f}")
+    print(f"Power factor range: {pf_min_max[0]:.4f} to {pf_min_max[1]:.4f}")
     print("\nDaily kWh check:")
     for day in range(1, 25):
         print(f"Apr {day:02d}: {daily[day]:.3f}")
