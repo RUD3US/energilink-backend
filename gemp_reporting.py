@@ -218,11 +218,21 @@ def upsert_report_schedule(
             raise ValueError("day_of_month must be 1..28")
         day_of_week = None
 
+    # Use UPSERT instead of UPDATE-only so Save Schedule still works even if
+    # the existing id=1 row was missing in an older deployed database.
     conn.execute(
         """
-        UPDATE report_schedule
-        SET frequency=?, send_time=?, day_of_week=?, day_of_month=?, enabled=?, updated_at=?
-        WHERE id=1
+        INSERT INTO report_schedule (
+            id, frequency, send_time, day_of_week, day_of_month, enabled, updated_at
+        )
+        VALUES (1, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            frequency=excluded.frequency,
+            send_time=excluded.send_time,
+            day_of_week=excluded.day_of_week,
+            day_of_month=excluded.day_of_month,
+            enabled=excluded.enabled,
+            updated_at=excluded.updated_at
         """,
         (
             frequency,
