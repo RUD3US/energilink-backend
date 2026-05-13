@@ -218,21 +218,11 @@ def upsert_report_schedule(
             raise ValueError("day_of_month must be 1..28")
         day_of_week = None
 
-    # Use UPSERT instead of UPDATE-only so Save Schedule still works even if
-    # the existing id=1 row was missing in an older deployed database.
     conn.execute(
         """
-        INSERT INTO report_schedule (
-            id, frequency, send_time, day_of_week, day_of_month, enabled, updated_at
-        )
-        VALUES (1, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
-            frequency=excluded.frequency,
-            send_time=excluded.send_time,
-            day_of_week=excluded.day_of_week,
-            day_of_month=excluded.day_of_month,
-            enabled=excluded.enabled,
-            updated_at=excluded.updated_at
+        UPDATE report_schedule
+        SET frequency=?, send_time=?, day_of_week=?, day_of_month=?, enabled=?, updated_at=?
+        WHERE id=1
         """,
         (
             frequency,
@@ -399,8 +389,8 @@ def _parse_float(v: Any) -> Optional[float]:
         return None
 
 
-def _avg_str(values: List[Optional[float]]) -> str:
-    valid = [v for v in values if v is not None]
+def _avg_str(values: List[Optional[float]], positive_only: bool = False) -> str:
+    valid = [v for v in values if v is not None and (not positive_only or v > 0)]
     if not valid:
         return ""
     return f"{sum(valid) / len(valid):.2f}"
@@ -414,7 +404,7 @@ def compute_stats_from_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         "avgGrossArea": _avg_str([_parse_float(r.get("grossArea")) for r in monthly_rows]),
         "avgAirconArea": _avg_str([_parse_float(r.get("airconArea")) for r in monthly_rows]),
         "avgOccupants": _avg_str([_parse_float(r.get("occupants")) for r in monthly_rows]),
-        "avgKwh": _avg_str([_parse_float(r.get("kwh")) for r in monthly_rows]),
+        "avgKwh": _avg_str([_parse_float(r.get("kwh")) for r in monthly_rows], positive_only=True),
     }
 
 

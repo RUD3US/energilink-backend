@@ -947,14 +947,6 @@ class HistoryRowOut(BaseModel):
     note: Optional[str] = None
 
 
-class HistoryMonthOut(BaseModel):
-    month_key: str
-    year: int
-    month: int
-    label: str
-    rows: int
-
-
 class NoteCreateIn(BaseModel):
     device: str = "pi4"
     metric: str = NOTE_METRIC_CANONICAL
@@ -1403,115 +1395,16 @@ def public_realtime(
     return [{"time": r["time"], "value": float(r["value"]) * scale} for r in rows][::-1]
 
 
-@app.get("/public/history/months", response_model=List[HistoryMonthOut])
-def public_history_months(
-    device: str = "pi4",
-    db: sqlite3.Connection = Depends(get_db),
-):
-    rows = db.execute(
-        """
-        WITH complete_rows AS (
-            SELECT
-                time,
-                MAX(CASE WHEN field='rms_voltage' THEN value END) AS rms_voltage,
-                MAX(CASE WHEN field='rms_current' THEN value END) AS rms_current,
-                MAX(CASE WHEN field='power' THEN value END) AS power,
-                MAX(CASE WHEN field='power_factor' THEN value END) AS power_factor
-            FROM realtime_points
-            WHERE device=?
-              AND field IN ('rms_voltage', 'rms_current', 'power', 'power_factor')
-            GROUP BY time
-        )
-        SELECT SUBSTR(time, 1, 7) AS month_key, COUNT(*) AS rows_count
-        FROM complete_rows
-        WHERE rms_voltage IS NOT NULL
-          AND rms_current IS NOT NULL
-          AND power IS NOT NULL
-          AND power_factor IS NOT NULL
-          AND rms_voltage > 0
-          AND rms_current > 0
-          AND power > 0
-          AND NOT (power_factor <= 0.001 AND power > 50)
-          AND rms_current <= ?
-          AND LENGTH(SUBSTR(time, 1, 7)) = 7
-        GROUP BY SUBSTR(time, 1, 7)
-        ORDER BY month_key DESC
-        """,
-        (device, MAX_REASONABLE_CURRENT_A),
-    ).fetchall()
-
-    output = []
-    for r in rows:
-        month_key = str(r["month_key"] or "")
-        try:
-            year = int(month_key[:4])
-            month = int(month_key[5:7])
-            label = f"{month_label_from_number(month)} {year}"
-        except Exception:
-            continue
-
-        output.append(
-            {
-                "month_key": month_key,
-                "year": year,
-                "month": month,
-                "label": label,
-                "rows": int(r["rows_count"] or 0),
-            }
-        )
-
-    return output
-
-
 @app.get("/public/history", response_model=List[HistoryRowOut])
 def public_history(
     device: str = "pi4",
     limit: int = 200,
-    year: Optional[int] = None,
-    month: Optional[int] = None,
-    start: Optional[str] = None,
-    end: Optional[str] = None,
     db: sqlite3.Connection = Depends(get_db),
 ):
-    limit = max(1, min(limit, 100000))
-
-    filters = [
-        "h.rms_voltage IS NOT NULL",
-        "h.rms_current IS NOT NULL",
-        "h.power IS NOT NULL",
-        "h.power_factor IS NOT NULL",
-        "h.rms_voltage > 0",
-        "h.rms_current > 0",
-        "h.power > 0",
-        "NOT (h.power_factor <= 0.001 AND h.power > 50)",
-        "h.rms_current <= ?",
-    ]
-    params: List[Any] = [
-        device,
-        device,
-        NOTE_METRIC_CANONICAL,
-        NOTE_METRIC_LEGACY,
-        MAX_REASONABLE_CURRENT_A,
-    ]
-
-    if year is not None and month is not None:
-        if year < 2000 or year > 3000 or month < 1 or month > 12:
-            raise HTTPException(status_code=400, detail="Invalid year/month")
-        filters.append("SUBSTR(h.time, 1, 7) = ?")
-        params.append(f"{year:04d}-{month:02d}")
-    else:
-        if start:
-            filters.append("h.time >= ?")
-            params.append(start)
-        if end:
-            filters.append("h.time < ?")
-            params.append(end)
-
-    params.append(limit)
-    where_sql = " AND ".join(filters)
+    limit = max(1, min(limit, 50000))
 
     rows = db.execute(
-        f"""
+        """
         WITH history_base AS (
             SELECT
                 device,
@@ -1548,11 +1441,24 @@ def public_history(
         LEFT JOIN note_base n
             ON h.device = n.device
            AND h.time = n.note_time
-        WHERE {where_sql}
+        WHERE h.rms_voltage IS NOT NULL
+         AND h.rms_current IS NOT NULL
+         AND h.power IS NOT NULL
+         AND h.power_factor IS NOT NULL
+         AND NOT (h.rms_voltage = 0 AND h.rms_current = 0)
+         AND NOT (h.power_factor <= 0.001 AND h.power > 50)
+         AND h.rms_current <= ?
         ORDER BY h.time DESC
         LIMIT ?
         """,
-        tuple(params),
+        (
+            device,
+            device,
+            NOTE_METRIC_CANONICAL,
+            NOTE_METRIC_LEGACY,
+            MAX_REASONABLE_CURRENT_A,
+            limit,
+        ),
     ).fetchall()
 
     return [
@@ -1567,7 +1473,6 @@ def public_history(
         }
         for r in rows
     ]
-
 
 @app.put("/history/note")
 def save_history_note(
